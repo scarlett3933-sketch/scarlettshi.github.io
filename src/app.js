@@ -239,14 +239,19 @@ class App {
 
     // ─── Spheres ──────────────────────────────────────────────────────────────
     updateSpheres(dt) {
-        if (this.running) this.elapsed+=dt;
-        const t=this.elapsed;
-        this.spheres.forEach(({mesh,halo,cfg},i)=>{
-            const pos=cfg.trajectory(t);
-            mesh.position.set(pos.x,pos.y,pos.z);
+        if (this.running) this.elapsed += dt;
+        const t = this.elapsed;
+        // DEBUG: 每 60 帧打一次日志，确认 running 和 elapsed 在增加
+        if (!this._dbgFrame) this._dbgFrame = 0;
+        if (++this._dbgFrame % 60 === 0) {
+            console.log(`[Sounding Space] running=${this.running} elapsed=${t.toFixed(2)} dt=${dt.toFixed(4)}`);
+        }
+        this.spheres.forEach(({mesh, halo, cfg}, i) => {
+            const pos = cfg.trajectory(t);
+            mesh.position.set(pos.x, pos.y, pos.z);
             halo.lookAt(this.camera.position);
-            mesh.material.emissiveIntensity=(this.running&&cfg.moving)?0.5+0.25*Math.sin(t*2+i):0.3;
-            this.setPannerPos(i,pos);
+            mesh.material.emissiveIntensity = (this.running && cfg.moving) ? 0.5 + 0.25 * Math.sin(t * 2 + i) : 0.3;
+            this.setPannerPos(i, pos);
         });
     }
 
@@ -412,14 +417,15 @@ class App {
                 const hit = this._castController(ctrl);
                 if (hit) {
                     const action = hit.object.userData.action;
-                    if (action === 'start') {
-                        // 直接在手势 context 里 resume，不走 promise 延迟
-                        audioCtx.resume().then(() => {
-                            this.running = true;
-                            this._refreshPanel();
-                        });
-                    } else if (action === 'stop') {
-                        this.stopAudio();
+                    if (action === 'start' && !this.running) {
+                        // 同步设置 running，不等 promise，确保下一帧 elapsed 立即开始累加
+                        audioCtx.resume(); // 触发解除 autoplay 限制（手势 context 内）
+                        this.running = true;
+                        this._refreshPanel();
+                    } else if (action === 'stop' && this.running) {
+                        this.running = false;
+                        audioCtx.suspend();
+                        this._refreshPanel();
                     }
                 }
             });
@@ -488,4 +494,3 @@ class App {
 }
 
 export { App };
-
