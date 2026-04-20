@@ -31,7 +31,7 @@ class App{
 		this.renderer = new THREE.WebGLRenderer({ antialias: true } );
 		this.renderer.setPixelRatio( window.devicePixelRatio );
 		this.renderer.setSize( window.innerWidth, window.innerHeight );
-        this.renderer.outputEncoding = THREE.sRGBEncoding;
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         
 		container.appendChild( this.renderer.domElement );
         
