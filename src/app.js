@@ -40,14 +40,17 @@ const CHANNEL_CONFIG = [
     { label:'CH1-R', color:0x3399ff, freq:130.8, moving:false, trajectory:()=>({x: 5,y:1.6,z:-6}) },
     { label:'CH2',   color:0x22cc88, freq:164.8, moving:false, trajectory:()=>({x: 0,y:1.6,z:-8}) },
     {
+        // CH3: 顺时针圆形（俯视，顺时针 = x正→z正→x负→z负）
         label:'CH3', color:0xffaa22, freq:196.0, moving:true,
-        trajectory:(t)=>({ x:Math.sin(t*0.5)*10, y:1.6, z:-Math.cos(t*0.5)*10 })
+        trajectory:(t)=>({ x:Math.sin(t*0.5)*10, y:1.6, z:Math.cos(t*0.5)*10 - 8 })
     },
     {
+        // CH4: 五角星 rose curve（k=2.5，5瓣）
         label:'CH4', color:0xff4488, freq:246.9, moving:true,
         trajectory:(t)=>{
-            const a=t*0.4, r=9*Math.abs(Math.cos(2.5*a));
-            return { x:r*Math.sin(a), y:1.6+Math.sin(t*1.3)*0.4, z:-r*Math.cos(a) };
+            const a = t * 0.35;
+            const r = 9 * Math.abs(Math.cos(2.5 * a));
+            return { x:r*Math.sin(a), y:1.6, z:r*Math.cos(a) - 8 };
         }
     }
 ];
@@ -95,7 +98,7 @@ class App {
         const container = document.createElement('div');
         document.body.appendChild(container);
 
-        this.clock   = new THREE.Timer();
+        this.clock   = new THREE.Clock();
         this.elapsed = 0;
         this.running = false;
 
@@ -472,7 +475,7 @@ class App {
     }
 
     render() {
-        const dt=this.clock.getDelta();
+        const dt = this.clock.getDelta();   // THREE.Clock: 直接返回正确 delta
         this.stats.update();
 
         this._processController(this.controllers[0], this.ctrlState[0]);
