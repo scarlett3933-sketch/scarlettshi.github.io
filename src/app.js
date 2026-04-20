@@ -101,7 +101,17 @@ class App{
     setupVR(){
         this.renderer.xr.enabled = true;
         
-        const button = new VRButton( this.renderer );
+        document.body.appendChild( VRButton.createButton( this.renderer ) );
+        // 进入 VR 时禁用 OrbitControls
+    this.renderer.xr.addEventListener('sessionstart', () => {
+        this.controls.enabled = false;
+    });
+
+    // 退出 VR 时恢复
+    this.renderer.xr.addEventListener('sessionend', () => {
+        this.controls.enabled = true;
+    });
+        
         
         const self = this;
         
