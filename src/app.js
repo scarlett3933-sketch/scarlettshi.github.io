@@ -3,6 +3,7 @@ import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 document.addEventListener("DOMContentLoaded", function () {
     const app = new App();
@@ -16,7 +17,7 @@ function createSpatialTone(freq) {
     const osc    = audioCtx.createOscillator();
     const gain   = audioCtx.createGain();
     const panner = audioCtx.createPanner();
-    osc.type            = 'sine';
+    osc.type            = 'sawtooth';
     osc.frequency.value = freq;
     gain.gain.value     = 0.16;
     panner.panningModel   = 'HRTF';
@@ -94,6 +95,59 @@ function makeButtonMesh(label, r, g, b, w=0.30, h=0.10) {
 }
 
 class App {
+    loadClockModel() {
+    const loader = new GLTFLoader();
+
+    const modelUrl = `${import.meta.env.BASE_URL}models/clocks.glb`;
+
+    loader.load(
+        modelUrl,
+        (gltf) => {
+            const model = gltf.scene;
+
+            const wrapper = new THREE.Group();
+            wrapper.name = 'ClocksModelWrapper';
+
+            // 自动把模型中心移到原点，并且放在地面上
+            const box = new THREE.Box3().setFromObject(model);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+
+            box.getSize(size);
+            box.getCenter(center);
+
+            model.position.x -= center.x;
+            model.position.y -= center.y;
+            model.position.z -= center.z;
+
+            // 让模型底部贴地
+            model.position.y += size.y / 2;
+
+            wrapper.add(model);
+
+            // 自动缩放：让模型最大尺寸约等于 2 米
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const targetSize = 4.0;
+            const scale = targetSize / maxDim;
+            wrapper.scale.setScalar(scale);
+
+            // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
+            wrapper.position.set(0, 0, -2.5);
+
+            this.scene.add(wrapper);
+
+            console.log('Clock model loaded:', model);
+        },
+        (xhr) => {
+            if (xhr.total) {
+                console.log(`Clock model ${(xhr.loaded / xhr.total * 100).toFixed(1)}% loaded`);
+            }
+        },
+        (error) => {
+            console.error('Error loading clock model:', error);
+        }
+    );
+}
     constructor() {
         const container = document.createElement('div');
         document.body.appendChild(container);
@@ -140,6 +194,7 @@ class App {
         this._pendingAudioAction = null;
 
         this.initScene();
+        this.loadClockModel();
         this.setupAudio();
         this.setupVR();
 
