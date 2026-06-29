@@ -132,7 +132,8 @@ class App {
             wrapper.scale.setScalar(scale);
 
             // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
-            wrapper.position.set(0, 0, -2.5);
+            wrapper.position.set(0, 0, -6);
+            wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
 
@@ -204,6 +205,16 @@ class App {
 
     // ─── Scene ────────────────────────────────────────────────────────────────
     initScene() {
+        const originMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xffff00 })
+);
+originMarker.position.set(0, 0, 0);
+this.scene.add(originMarker);
+
+const axesHelper = new THREE.AxesHelper(3);
+this.scene.add(axesHelper);
+
         this.scene.fog = new THREE.FogExp2(0x101820,0.018);
         const ground = new THREE.Mesh(
             new THREE.PlaneGeometry(200,200),
