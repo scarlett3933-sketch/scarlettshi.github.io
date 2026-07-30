@@ -98,7 +98,8 @@ class App {
     loadClockModel() {
     const loader = new GLTFLoader();
 
-    const modelUrl = `${import.meta.env.BASE_URL}models/clocks.glb`;
+    const modelUrl =
+    `${import.meta.env.BASE_URL}models/One_Thousand_Clocks_Test_7_29.glb`;
 
     loader.load(
         modelUrl,
@@ -132,7 +133,8 @@ class App {
             wrapper.scale.setScalar(scale);
 
             // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
-            wrapper.position.set(0, 0, -6);
+            wrapper.position.set(0, 0, -3
+            );
             wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
