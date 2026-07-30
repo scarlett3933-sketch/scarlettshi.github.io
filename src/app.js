@@ -133,8 +133,7 @@ class App {
             wrapper.scale.setScalar(scale);
 
             // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
-            wrapper.position.set(0, 0, -3
-            );
+            wrapper.position.set(0, 1.5, -3);
             wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
