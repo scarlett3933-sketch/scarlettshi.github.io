@@ -205,8 +205,16 @@ setTimeout(() => {
         const container = document.createElement('div');
         document.body.appendChild(container);
         const FLOOR_OFFSET = 0.883; // 从射线检测得到的地板真实高度
-        const EYE_HEIGHT = 1.6;
-        const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
+const EYE_HEIGHT = 2; // ← 按你上次反馈先调高，之后可继续微调
+const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
+
+this.floorWorldY = FLOOR_OFFSET; // 保存地板高度，供瞬移逻辑使用
+
+// 瞬移状态：每个手柄一份
+this.teleportState = [
+    { aiming:false, targetValid:false, targetPoint:new THREE.Vector3() },
+    { aiming:false, targetValid:false, targetPoint:new THREE.Vector3() }
+];
         
         this.clock   = new THREE.Clock();
         this.elapsed = 0;
@@ -306,6 +314,15 @@ this.scene.add(axesHelper);
             this.scene.add(mesh);
             return { mesh, halo, cfg };
         });
+        // 瞬移落点标记
+        const markerGeo = new THREE.RingGeometry(0.25, 0.35, 32);
+        const markerMat = new THREE.MeshBasicMaterial({
+        color: 0x00ff88, side: THREE.DoubleSide, transparent: true, opacity: 0.8
+});
+        this.teleportMarker = new THREE.Mesh(markerGeo, markerMat);
+        this.teleportMarker.rotation.x = -Math.PI / 2;
+        this.teleportMarker.visible = false;
+        this.scene.add(this.teleportMarker);
     }
 
     // ─── Audio ────────────────────────────────────────────────────────────────
@@ -496,18 +513,46 @@ this.scene.add(axesHelper);
         state.justFired=false;
     }
 
-    // ─── Locomotion ───────────────────────────────────────────────────────────
-    handleLocomotion(dt) {
-        const ctrl=this.controllers[0];
-        if (!ctrl || !this.ctrlState[0].selectPressed) return;
-        if (this._castController(ctrl)) return;
-        const q=this.dolly.quaternion.clone();
-        this.dolly.quaternion.copy(this.dummyCam.getWorldQuaternion(this.tmpQuat));
-        this.dolly.translateZ(-dt*2);
-        this.dolly.position.y=0;
-        this.dolly.quaternion.copy(q);
-    }
+    // ─── Teleport ─────────────────────────────────────────────────────────────
+updateTeleport() {
+    for (let i = 0; i < this.controllers.length; i++) {
+        const ctrl = this.controllers[i];
+        const ts = this.teleportState[i];
+        if (!ctrl || !ts.aiming) continue;
 
+        const origin = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        ctrl.getWorldPosition(origin);
+        direction.set(0,0,-1).transformDirection(ctrl.matrixWorld).normalize();
+
+        // 与地板平面（y = floorWorldY）求交点
+        // 只有当射线朝下（direction.y < 0）时才有有效落点
+        if (direction.y < -0.001) {
+            const t = (this.floorWorldY - origin.y) / direction.y;
+            if (t > 0) {
+                ts.targetPoint.copy(origin).addScaledVector(direction, t);
+                ts.targetValid = true;
+            } else {
+                ts.targetValid = false;
+            }
+        } else {
+            ts.targetValid = false;
+        }
+
+        if (ts.targetValid) {
+            this.teleportMarker.position.set(
+                ts.targetPoint.x, this.floorWorldY + 0.01, ts.targetPoint.z
+            );
+            this.teleportMarker.material.color.set(0x00ff88); // 绿色=可传送
+            this.teleportMarker.visible = true;
+        } else {
+            this.teleportMarker.visible = false;
+        }
+
+        // 只处理正在瞄准的第一个手柄，避免双手同时瞄准冲突
+        break;
+    }
+}
     // ─── VR ───────────────────────────────────────────────────────────────────
     setupVR() {
         this.renderer.xr.enabled=true;
@@ -553,6 +598,19 @@ this.scene.add(axesHelper);
             ctrl.addEventListener('selectend',()=>{
                 this.ctrlState[i].selectPressed=false;
             });
+            ctrl.addEventListener('squeezestart',()=>{
+            this.teleportState[i].aiming = true;
+            });
+            ctrl.addEventListener('squeezeend',()=>{
+            const ts = this.teleportState[i];
+            if (ts.aiming && ts.targetValid) {
+            // 执行瞬移：只挪动水平位置，dolly 的 y 始终保持 0
+         this.dolly.position.x = ts.targetPoint.x;
+        this.dolly.position.z = ts.targetPoint.z;
+     }
+         ts.aiming = false;
+    this.teleportMarker.visible = false;
+});
             ctrl.addEventListener('connected',(event)=>{
                 const grip=this.renderer.xr.getControllerGrip(i);
                 const factory=new XRControllerModelFactory();
@@ -607,7 +665,7 @@ this.scene.add(axesHelper);
 
         this._processController(this.controllers[0], this.ctrlState[0]);
         this._processController(this.controllers[1], this.ctrlState[1]);
-        this.handleLocomotion(dt);
+        this.updateTeleport();
         this.updateSpheres(dt);
         this.updateAudioListener();
         this.renderer.render(this.scene,this.camera);
