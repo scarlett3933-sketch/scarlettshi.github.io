@@ -35,6 +35,50 @@ function createSpatialTone(freq) {
     return { osc, gain, panner };
 }
 
+// 钟表专用音源：正弦波、初始静音（等到真正触发时间再淡入），
+// 跟 CH1~CH4 用同一套 panner 参数，只是波形/初始增益不同
+function createClockTone(freq) {
+    const osc    = audioCtx.createOscillator();
+    const gain   = audioCtx.createGain();
+    const panner = audioCtx.createPanner();
+    osc.type            = 'sine';   // 正弦波，谐波少，不容易和别的钟表打架
+    osc.frequency.value = freq;
+    gain.gain.value      = 0;        // 初始静音，飞出去的那一刻才淡入（见 updateClocks）
+    panner.panningModel   = 'HRTF';
+    panner.distanceModel  = 'inverse';
+    panner.refDistance    = 1;
+    panner.maxDistance    = 60;
+    panner.rolloffFactor  = 1.2;
+    panner.coneInnerAngle = 360;
+    panner.coneOuterAngle = 360;
+    panner.coneOuterGain  = 0;
+    osc.connect(gain);
+    gain.connect(panner);
+    panner.connect(audioCtx.destination);
+    osc.start();
+    return { osc, gain, panner };
+}
+
+// 跟 CH1~CH4 保持同一个 Cmaj7 和弦（C3 E3 G3 B3），钟表音高按这个和弦循环分配，
+// 每循环一轮往上一个八度（最多循环 3 轮，避免音高无限往上飙）
+// 这样几十个钟表叠在一起时音高互相和谐，而不是像等差数列那样挤成一坨拍频噪音
+const CMAJ7_CHORD = [130.81, 164.81, 196.00, 246.94];
+function clockFrequency(index) {
+    const octaveShift = Math.floor(index / CMAJ7_CHORD.length) % 3; // 0,1,2 循环
+    return CMAJ7_CHORD[index % CMAJ7_CHORD.length] * Math.pow(2, 1 + octaveShift);
+}
+
+// 通用：立即设置某个 panner 节点的位置（钟表音源复用这个，跟 CH1~CH4 的 setPannerPos 是同一套逻辑）
+function setImmediatePannerPos(panner, pos) {
+    if (panner.positionX) {
+        panner.positionX.value = pos.x;
+        panner.positionY.value = pos.y;
+        panner.positionZ.value = pos.z;
+    } else {
+        panner.setPosition(pos.x, pos.y, pos.z);
+    }
+}
+
 // ─── Cmaj7 ────────────────────────────────────────────────────────────────────
 const CHANNEL_CONFIG = [
     { label:'CH1-L', color:0x3399ff, freq:130.8, moving:false, trajectory:()=>({x:-5,y:1.6,z:-6}) },
@@ -96,7 +140,7 @@ function makeButtonMesh(label, r, g, b, w=0.30, h=0.10) {
 // ─── load 3D MODEL ────────────────────────────────────────────
 class App {
 loadClockModel() {
-    const DEBUG_MESH_INFO = false; // 需要调试时改成 true
+    const DEBUG_MESH_INFO = false; // 需要调试时改成 true（包含：尺寸排序表、点击识别、全名字搜索）
 
     const loader = new GLTFLoader();
     const modelUrl = `${import.meta.env.BASE_URL}models/Thousand Clocks Demo.glb`;
@@ -172,21 +216,99 @@ loadClockModel() {
             // wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
-            // 调试：确认包裹后的世界坐标包围盒
-const worldBox = new THREE.Box3().setFromObject(wrapper);
-console.log('wrapper世界坐标包围盒:', worldBox.min, worldBox.max);
-setTimeout(() => {
-    const rc = new THREE.Raycaster();
-    // 从塔楼内部一个中等高度往下打，比如 y=8（屋顶之下、地面之上）
-    const origin = new THREE.Vector3(0, 8, 0);
-    const dir = new THREE.Vector3(0, -1, 0);
-    rc.set(origin, dir);
-    const hits = rc.intersectObject(wrapper, true);
-    console.log('从塔楼内部(y=8)往下打，共命中', hits.length, '个物体：');
-    hits.slice(0, 20).forEach(h => {
-        console.log('  name:', h.object.name, ' 世界坐标y:', h.point.y.toFixed(3));
-    });
-}, 500);
+
+            if (DEBUG_MESH_INFO) {
+                // ── 调试用：点击识别 mesh（桌面浏览器里点一下，控制台打印名字/坐标/父级） ──
+                const pickRaycaster = new THREE.Raycaster();
+                const pickMouse = new THREE.Vector2();
+
+                window.addEventListener('click', (event) => {
+                    pickMouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                    pickMouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+                    pickRaycaster.setFromCamera(pickMouse, this.camera);
+                    const hits = pickRaycaster.intersectObject(wrapper, true);
+
+                    if (hits.length > 0) {
+                        const obj = hits[0].object;
+                        const worldPos = new THREE.Vector3();
+                        obj.getWorldPosition(worldPos);
+                        console.log(
+                            `%c点中了: ${obj.name}`,
+                            'color:#0f0;font-weight:bold',
+                            ' 世界坐标:', worldPos.toArray().map(v => v.toFixed(2)),
+                            ' parent:', obj.parent?.name,
+                            ' parent的parent:', obj.parent?.parent?.name
+                        );
+                    } else {
+                        console.log('没点中任何东西');
+                    }
+                });
+
+                // ── 调试用：搜索钟表相关命名 ──
+                console.log('=== 搜索钟表相关命名 ===');
+                const allNames = [];
+                let clockLikeCount = 0;
+                model.traverse((object) => {
+                    if (!object.isMesh) return;
+                    allNames.push(object.name);
+                    if (/clock|钟|watch|时钟|dial|表盘/i.test(object.name)) {
+                        clockLikeCount++;
+                        console.log('%c疑似钟表命名: ' + object.name, 'color:#0f0;font-weight:bold');
+                    }
+                });
+                console.log(`模型总共 ${allNames.length} 个 mesh，其中 ${clockLikeCount} 个疑似跟"钟表"相关的命名`);
+                console.log('完整名字列表（可以复制去搜索/查重）：', allNames);
+            }
+
+            // ── 收集所有钟表 Group（Clock_N 是空的父级节点，不是 mesh，
+            //    之前只 traverse mesh 才会漏掉这一层） ──────────────────────────────
+            this.clockRegistry = [];
+
+            const clockGroups = [];
+            model.traverse((object) => {
+                if (/^Clock_\d+$/i.test(object.name)) {
+                    clockGroups.push(object);
+                }
+            });
+            console.log(`找到 ${clockGroups.length} 个钟表 Group：`, clockGroups.map(g => g.name));
+
+            // 单个钟表的目标音量：钟表越多，每个越要压低，避免几十个音源叠加后总音量爆表失真
+            // 0.5 是"全部同时响"时大致的总音量上限，按 sqrt(数量) 分摊（能量叠加近似满足平方根关系）
+            const perClockGain = clockGroups.length > 0
+                ? Math.min(0.14, 0.5 / Math.sqrt(clockGroups.length))
+                : 0.14;
+
+            clockGroups.forEach((clockObj, index) => {
+                // 关键：用 attach() 把钟表重新挂到 scene 下，
+                // three.js 会自动保持它在世界坐标系里的视觉位置/旋转/缩放不变
+                // （这样就不用手算 wrapper 的 scale/position 补偿）
+                this.scene.attach(clockObj);
+
+                const originalPosition = clockObj.position.clone();
+
+                // 每个钟表配一个正弦波音源，音高按 Cmaj7 和弦循环分配，初始静音
+                const audioNode = createClockTone(clockFrequency(index));
+                setImmediatePannerPos(audioNode.panner, originalPosition);
+
+                this.clockRegistry.push({
+                    name: clockObj.name,
+                    object: clockObj,
+                    originalPosition,
+                    audioNode,
+                    targetGain: perClockGain, // 淡入时要达到的目标音量
+                    soundStarted: false,      // 是否已经淡入过（避免每帧重复触发淡入）
+                    // 触发时间（秒），到了这个时间点开始飞；先给测试值，之后按需给每个钟表单独设置
+                    triggerTime: 5 + index * 0.3,
+                    duration: 6,           // 飞行持续时间
+                    // 轨迹函数，接收"原始位置"和"0~1 的飞行进度"，返回世界坐标
+                    trajectory: (originalPos, tt) => ({
+                        x: originalPos.x + tt * 3 * Math.sin(index),
+                        y: originalPos.y - tt * 2,           // 举例：往下坠落飞出去
+                        z: originalPos.z + tt * 5 * Math.cos(index)
+                    })
+                });
+            });
 
             console.log('Clock model loaded, scale:', scale);
         },
@@ -204,7 +326,7 @@ setTimeout(() => {
     constructor() {
         const container = document.createElement('div');
         document.body.appendChild(container);
-        const FLOOR_OFFSET = 0.883; // 从射线检测得到的地板真实高度
+        const FLOOR_OFFSET = 1.10; // 从射线检测得到的地板真实高度
 const EYE_HEIGHT = 2; // ← 按你上次反馈先调高，之后可继续微调
 const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
 
@@ -242,7 +364,6 @@ this.teleportState = [
         this.controls.target.set(0, cameraY, 0);
         this.controls.update();
         this.stats   = new Stats();
-        this.tmpQuat = new THREE.Quaternion();
         this.rc      = new THREE.Raycaster();
 
         // Per-controller state
@@ -253,9 +374,6 @@ this.teleportState = [
             selectPressed:false, justFired:false, hoveredBtn:null,
             ray:null
         }];
-
-        // FIX 2: 提前初始化 pendingAudioAction，用于在手势 context 里触发音频
-        this._pendingAudioAction = null;
 
         this.initScene();
         this.loadClockModel();
@@ -333,6 +451,9 @@ this.scene.add(axesHelper);
 
     // FIX 2: startAudio / stopAudio 现在接受一个可选的"已在手势中"参数
     // 在 VR selectstart 事件里直接调用 audioCtx.resume()，不依赖 promise 回调
+    // 注：VR 手柄按钮现在走的是 setupVR() 里内联的逻辑，不调用这两个方法，
+    // 但这两个方法保留着，方便桌面浏览器控制台直接敲
+    // window.app.startAudio() / window.app.stopAudio() 测试音频，不用戴头显
     startAudio(inGestureContext = false) {
         if (this.running) return;
         if (inGestureContext) {
@@ -390,6 +511,32 @@ this.scene.add(axesHelper);
             halo.lookAt(this.camera.position);
             mesh.material.emissiveIntensity = (this.running && cfg.moving) ? 0.5 + 0.25 * Math.sin(t * 2 + i) : 0.3;
             this.setPannerPos(i, pos);
+        });
+    }
+
+    // ─── Clocks ───────────────────────────────────────────────────────────────
+    // 跟 updateSpheres 完全对称：到了 triggerTime 就沿 trajectory 更新钟表的位置和音源位置
+    updateClocks(dt) {
+        if (!this.clockRegistry || !this.running) return;
+        const t = this.elapsed;
+
+        this.clockRegistry.forEach((clockData) => {
+            if (t < clockData.triggerTime) return; // 还没到触发时间
+
+            // 第一次越过触发时间：淡入音量（0.8 秒线性淡入），而不是瞬间跳到目标音量
+            if (!clockData.soundStarted) {
+                clockData.soundStarted = true;
+                const gainParam = clockData.audioNode.gain.gain;
+                gainParam.cancelScheduledValues(audioCtx.currentTime);
+                gainParam.setValueAtTime(0, audioCtx.currentTime);
+                gainParam.linearRampToValueAtTime(clockData.targetGain, audioCtx.currentTime + 0.8);
+            }
+
+            const tt = Math.min((t - clockData.triggerTime) / clockData.duration, 1);
+            const pos = clockData.trajectory(clockData.originalPosition, tt);
+
+            clockData.object.position.set(pos.x, pos.y, pos.z);
+            setImmediatePannerPos(clockData.audioNode.panner, pos);
         });
     }
 
@@ -565,9 +712,6 @@ updateTeleport() {
     this.dolly.add(this.camera);
     this.scene.add(this.dolly);
 
-    this.dummyCam=new THREE.Object3D();
-    this.camera.add(this.dummyCam);
-
     this.renderer.xr.addEventListener('sessionstart',()=>{
         this.controls.enabled=false;
         this.vrPanel.visible=true;
@@ -665,6 +809,7 @@ updateTeleport() {
         this._processController(this.controllers[1], this.ctrlState[1]);
         this.updateTeleport();
         this.updateSpheres(dt);
+        this.updateClocks(dt);
         this.updateAudioListener();
         this.renderer.render(this.scene,this.camera);
     }
