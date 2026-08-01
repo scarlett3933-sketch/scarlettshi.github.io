@@ -93,7 +93,7 @@ function makeButtonMesh(label, r, g, b, w=0.30, h=0.10) {
     };
     return mesh;
 }
-
+// ─── load 3D MODEL ────────────────────────────────────────────
 class App {
 loadClockModel() {
     const DEBUG_MESH_INFO = false; // 需要调试时改成 true
@@ -172,6 +172,21 @@ loadClockModel() {
             // wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
+            // 调试：确认包裹后的世界坐标包围盒
+const worldBox = new THREE.Box3().setFromObject(wrapper);
+console.log('wrapper世界坐标包围盒:', worldBox.min, worldBox.max);
+setTimeout(() => {
+    const rc = new THREE.Raycaster();
+    // 从塔楼内部一个中等高度往下打，比如 y=8（屋顶之下、地面之上）
+    const origin = new THREE.Vector3(0, 8, 0);
+    const dir = new THREE.Vector3(0, -1, 0);
+    rc.set(origin, dir);
+    const hits = rc.intersectObject(wrapper, true);
+    console.log('从塔楼内部(y=8)往下打，共命中', hits.length, '个物体：');
+    hits.slice(0, 20).forEach(h => {
+        console.log('  name:', h.object.name, ' 世界坐标y:', h.point.y.toFixed(3));
+    });
+}, 500);
 
             console.log('Clock model loaded, scale:', scale);
         },
@@ -185,17 +200,21 @@ loadClockModel() {
         }
     );
 }
+// ─── RENDER RELATED ────────────────────────────────────────────
     constructor() {
         const container = document.createElement('div');
         document.body.appendChild(container);
-
+        const FLOOR_OFFSET = 0.883; // 从射线检测得到的地板真实高度
+        const EYE_HEIGHT = 1.6;
+        const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
+        
         this.clock   = new THREE.Clock();
         this.elapsed = 0;
         this.running = false;
 
         this.camera = new THREE.PerspectiveCamera(50, window.innerWidth/window.innerHeight, 0.1, 200);
         // FIX 1: camera 不再设置 z 偏移，由 dolly 控制位置
-        this.camera.position.set(0, 1.6, 0);
+        this.camera.position.set(0, cameraY, 0);
 
         this.scene = new THREE.Scene();
         this.scene.background = new THREE.Color(0x101820);
@@ -211,9 +230,9 @@ loadClockModel() {
         container.appendChild(this.renderer.domElement);
 
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.target.set(0,1.6,0);
+        
+        this.controls.target.set(0, cameraY, 0);
         this.controls.update();
-
         this.stats   = new Stats();
         this.tmpQuat = new THREE.Quaternion();
         this.rc      = new THREE.Raycaster();
