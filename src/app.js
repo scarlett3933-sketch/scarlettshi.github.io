@@ -95,83 +95,85 @@ function makeButtonMesh(label, r, g, b, w=0.30, h=0.10) {
 }
 
 class App {
-    loadClockModel() {
-    const loader = new GLTFLoader();
+loadClockModel() {
+    const DEBUG_MESH_INFO = false; // 需要调试时改成 true
 
-    const modelUrl =
-    `${import.meta.env.BASE_URL}models/Thousand Clocks Demo.glb`;
+    const loader = new GLTFLoader();
+    const modelUrl = `${import.meta.env.BASE_URL}models/Thousand Clocks Demo.glb`;
 
     loader.load(
         modelUrl,
         (gltf) => {
-              
-        const buildingMeshes = [];
-
-gltf.scene.traverse((object) => {
-    if (!object.isMesh) return;
-
-    const isWorldGrid =
-        /HLOD|MainGrid|ProcGrid|Landscape/i.test(
-            `${object.name} ${object.material?.name || ''}`
-        );
-
-    if (!isWorldGrid) {
-        buildingMeshes.push({
-            name: object.name,
-            material: object.material?.name
-        });
-    }
-});
-
-console.log('可能属于建筑的 Mesh：', buildingMeshes);
-  
-
             const model = gltf.scene;
 
-            const wrapper = new THREE.Group();
-            wrapper.name = 'ClocksModelWrapper';
+            if (DEBUG_MESH_INFO) {
+                const allMeshInfo = [];
+                model.traverse((object) => {
+                    if (!object.isMesh) return;
+                    const box = new THREE.Box3().setFromObject(object);
+                    const size = new THREE.Vector3();
+                    box.getSize(size);
+                    allMeshInfo.push({
+                        name: object.name,
+                        material: object.material?.name,
+                        maxDim: Math.max(size.x, size.y, size.z),
+                        size
+                    });
+                });
+                allMeshInfo.sort((a, b) => b.maxDim - a.maxDim);
+                console.log('模型里一共有', allMeshInfo.length, '个 mesh');
+                console.table(allMeshInfo.slice(0, 10).map(m => ({
+                    name: m.name, material: m.material, maxDim: m.maxDim.toFixed(3)
+                })));
+            }
 
-            // 自动把模型中心移到原点，并且放在地面上
+            // 删除天空球 / 世界网格分块等不需要的环境物体
+            const meshesToRemove = [];
+            model.traverse((object) => {
+                if (!object.isMesh) return;
+                const objectInfo = `${object.name} ${object.material?.name || ''}`;
+                const isWorldGrid =
+                    /HLOD|MainGrid|ProcGrid|Landscape|Sky|Dome/i.test(objectInfo);
+                if (isWorldGrid) {
+                    meshesToRemove.push(object);
+                }
+            });
+            meshesToRemove.forEach((object) => object.parent?.remove(object));
+
+            // 重新计算清理后的模型尺寸
             const box = new THREE.Box3().setFromObject(model);
             const size = new THREE.Vector3();
             const center = new THREE.Vector3();
-
             box.getSize(size);
             box.getCenter(center);
-            console.log('整个 GLB 尺寸：', {
-    x: size.x,
-    y: size.y,
-    z: size.z
-});
 
-console.log('整个 GLB 中心：', {
-    x: center.x,
-    y: center.y,
-    z: center.z
-});
+            console.log('删除后模型尺寸：', { x: size.x, y: size.y, z: size.z });
+            console.log('删除后模型中心：', { x: center.x, y: center.y, z: center.z });
 
+            // 把模型水平居中在原点，Y 方向让最低点贴地
             model.position.x -= center.x;
-            model.position.y -= center.y;
             model.position.z -= center.z;
+            model.position.y -= box.min.y;
 
-            // 让模型底部贴地
-            model.position.y += size.y / 2;
-
+            const wrapper = new THREE.Group();
+            wrapper.name = 'ClocksModelWrapper';
             wrapper.add(model);
 
-            // 自动缩放：让模型最大尺寸约等于 2 米
+            // 按接近真实建筑的尺寸缩放（站在塔楼内部）
             const maxDim = Math.max(size.x, size.y, size.z);
-            const targetSize = 4.0;
+            const targetSize = 14.0; // ← 调这个数字控制塔楼实际大小
             const scale = targetSize / maxDim;
             wrapper.scale.setScalar(scale);
 
-            // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
-            wrapper.position.set(0, 0, -5);
-            wrapper.rotation.y = Math.PI / 2;
+            // wrapper 放在原点，玩家就站在塔楼内部
+            wrapper.position.set(0, 0, 0);
+
+            // 先不旋转，看默认朝向对不对
+            // wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
 
-            console.log('Clock model loaded:', model);
+            console.log('Clock model loaded, scale:', scale);
         },
         (xhr) => {
             if (xhr.total) {
