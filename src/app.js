@@ -554,104 +554,102 @@ updateTeleport() {
     }
 }
     // ─── VR ───────────────────────────────────────────────────────────────────
-    setupVR() {
-        this.renderer.xr.enabled=true;
-        document.body.appendChild(VRButton.createButton(this.renderer));
+  setupVR() {
+    this.renderer.xr.enabled=true;
+    this.renderer.xr.setReferenceSpaceType('local-floor')
+    document.body.appendChild(VRButton.createButton(this.renderer));
 
-        this.renderer.xr.addEventListener('sessionstart',()=>{
-            this.controls.enabled=false;
-            this.vrPanel.visible=true;
-        });
-        this.renderer.xr.addEventListener('sessionend',()=>{
-            this.controls.enabled=true;
-            this.vrPanel.visible=false;
-            if (this.running) this.stopAudio();
-        });
+    // dolly 提前创建，后面 controller/grip 都要挂在它下面
+    this.dolly=new THREE.Object3D();
+    this.dolly.position.set(0, 0, 0);
+    this.dolly.add(this.camera);
+    this.scene.add(this.dolly);
 
-        this.controllers=[
-            this.renderer.xr.getController(0),
-            this.renderer.xr.getController(1)
-        ];
+    this.dummyCam=new THREE.Object3D();
+    this.camera.add(this.dummyCam);
 
-        this.controllers.forEach((ctrl,i)=>{
-            ctrl.addEventListener('selectstart',()=>{
-                this.ctrlState[i].selectPressed=true;
-                this.ctrlState[i].justFired=true;
+    this.renderer.xr.addEventListener('sessionstart',()=>{
+        this.controls.enabled=false;
+        this.vrPanel.visible=true;
+        this.dolly.position.y = this.floorWorldY; // ← 修复眼高
+    });
+    this.renderer.xr.addEventListener('sessionend',()=>{
+        this.controls.enabled=true;
+        this.vrPanel.visible=false;
+        this.dolly.position.y = 0;
+        if (this.running) this.stopAudio();
+    });
 
-                // FIX 2: 在 selectstart（手势事件）context 中直接处理音频
-                // 此时调用 audioCtx.resume() 才被浏览器/Quest 认为是合法的用户手势触发
-                const hit = this._castController(ctrl);
-                if (hit) {
-                    const action = hit.object.userData.action;
-                    if (action === 'start' && !this.running) {
-                        // 同步设置 running，不等 promise，确保下一帧 elapsed 立即开始累加
-                        audioCtx.resume(); // 触发解除 autoplay 限制（手势 context 内）
-                        this.running = true;
-                        this._refreshPanel();
-                    } else if (action === 'stop' && this.running) {
-                        this.running = false;
-                        audioCtx.suspend();
-                        this._refreshPanel();
-                    }
+    this.controllers=[
+        this.renderer.xr.getController(0),
+        this.renderer.xr.getController(1)
+    ];
+
+    this.controllers.forEach((ctrl,i)=>{
+        ctrl.addEventListener('selectstart',()=>{
+            this.ctrlState[i].selectPressed=true;
+            this.ctrlState[i].justFired=true;
+
+            const hit = this._castController(ctrl);
+            if (hit) {
+                const action = hit.object.userData.action;
+                if (action === 'start' && !this.running) {
+                    audioCtx.resume();
+                    this.running = true;
+                    this._refreshPanel();
+                } else if (action === 'stop' && this.running) {
+                    this.running = false;
+                    audioCtx.suspend();
+                    this._refreshPanel();
                 }
-            });
-            ctrl.addEventListener('selectend',()=>{
-                this.ctrlState[i].selectPressed=false;
-            });
-            ctrl.addEventListener('squeezestart',()=>{
+            }
+        });
+        ctrl.addEventListener('selectend',()=>{
+            this.ctrlState[i].selectPressed=false;
+        });
+        ctrl.addEventListener('squeezestart',()=>{
             this.teleportState[i].aiming = true;
-            });
-            ctrl.addEventListener('squeezeend',()=>{
+        });
+        ctrl.addEventListener('squeezeend',()=>{
             const ts = this.teleportState[i];
             if (ts.aiming && ts.targetValid) {
-            // 执行瞬移：只挪动水平位置，dolly 的 y 始终保持 0
-         this.dolly.position.x = ts.targetPoint.x;
-        this.dolly.position.z = ts.targetPoint.z;
-     }
-         ts.aiming = false;
-    this.teleportMarker.visible = false;
-});
-            ctrl.addEventListener('connected',(event)=>{
-                const grip=this.renderer.xr.getControllerGrip(i);
-                const factory=new XRControllerModelFactory();
-                if (grip.children.length===0) {
-                    grip.add(factory.createControllerModel(grip));
-                }
-                if (!this.ctrlState[i].ray) {
-                    this.ctrlState[i].ray=this._buildRayLine(ctrl);
-                }
-            });
-            ctrl.addEventListener('disconnected',()=>{
-                if (this.ctrlState[i].ray) {
-                    ctrl.remove(this.ctrlState[i].ray);
-                    this.ctrlState[i].ray=null;
-                }
-            });
-            this.scene.add(ctrl);
+                this.dolly.position.x = ts.targetPoint.x;
+                this.dolly.position.z = ts.targetPoint.z;
+            }
+            ts.aiming = false;
+            this.teleportMarker.visible = false;
         });
-
-        this.grips=[
-            this.renderer.xr.getControllerGrip(0),
-            this.renderer.xr.getControllerGrip(1)
-        ];
-        const factory=new XRControllerModelFactory();
-        this.grips.forEach((g,i)=>{
-            g.add(factory.createControllerModel(g));
-            this.scene.add(g);
+        ctrl.addEventListener('connected',(event)=>{
+            const grip=this.renderer.xr.getControllerGrip(i);
+            const factory=new XRControllerModelFactory();
+            if (grip.children.length===0) {
+                grip.add(factory.createControllerModel(grip));
+            }
+            if (!this.ctrlState[i].ray) {
+                this.ctrlState[i].ray=this._buildRayLine(ctrl);
+            }
         });
+        ctrl.addEventListener('disconnected',()=>{
+            if (this.ctrlState[i].ray) {
+                ctrl.remove(this.ctrlState[i].ray);
+                this.ctrlState[i].ray=null;
+            }
+        });
+        this.dolly.add(ctrl); // ← 改成挂在 dolly 下面
+    });
 
-        // FIX 1: dolly 从原点出发，z=0
-        // 场景内容在 z 负方向，玩家站在原点看向负 z（Three.js 默认 camera 看向 -z）
-        this.dolly=new THREE.Object3D();
-        this.dolly.position.set(0, 0, 0); // ← 修复：不再偏移到 z=5
-        this.dolly.add(this.camera);
-        this.scene.add(this.dolly);
+    this.grips=[
+        this.renderer.xr.getControllerGrip(0),
+        this.renderer.xr.getControllerGrip(1)
+    ];
+    const factory=new XRControllerModelFactory();
+    this.grips.forEach((g,i)=>{
+        g.add(factory.createControllerModel(g));
+        this.dolly.add(g); // ← 改成挂在 dolly 下面
+    });
 
-        this.dummyCam=new THREE.Object3D();
-        this.camera.add(this.dummyCam);
-
-        this.buildVRPanel();
-    }
+    this.buildVRPanel();
+}
 
     resize() {
         this.camera.aspect=window.innerWidth/window.innerHeight;
