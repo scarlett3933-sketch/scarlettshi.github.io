@@ -99,11 +99,33 @@ class App {
     const loader = new GLTFLoader();
 
     const modelUrl =
-    `${import.meta.env.BASE_URL}models/One_Thousand_Clocks_Test_7_29.glb`;
+    `${import.meta.env.BASE_URL}models/Thousand Clocks Demo.glb`;
 
     loader.load(
         modelUrl,
         (gltf) => {
+              
+        const buildingMeshes = [];
+
+gltf.scene.traverse((object) => {
+    if (!object.isMesh) return;
+
+    const isWorldGrid =
+        /HLOD|MainGrid|ProcGrid|Landscape/i.test(
+            `${object.name} ${object.material?.name || ''}`
+        );
+
+    if (!isWorldGrid) {
+        buildingMeshes.push({
+            name: object.name,
+            material: object.material?.name
+        });
+    }
+});
+
+console.log('可能属于建筑的 Mesh：', buildingMeshes);
+  
+
             const model = gltf.scene;
 
             const wrapper = new THREE.Group();
@@ -116,6 +138,17 @@ class App {
 
             box.getSize(size);
             box.getCenter(center);
+            console.log('整个 GLB 尺寸：', {
+    x: size.x,
+    y: size.y,
+    z: size.z
+});
+
+console.log('整个 GLB 中心：', {
+    x: center.x,
+    y: center.y,
+    z: center.z
+});
 
             model.position.x -= center.x;
             model.position.y -= center.y;
@@ -133,7 +166,7 @@ class App {
             wrapper.scale.setScalar(scale);
 
             // 放到玩家前方。你的 WebXR 默认看向 -Z，所以 z 要是负数
-            wrapper.position.set(0, 1.5, -3);
+            wrapper.position.set(0, 0, -5);
             wrapper.rotation.y = Math.PI / 2;
 
             this.scene.add(wrapper);
