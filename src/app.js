@@ -260,6 +260,7 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
     }
     draw(r, g, b);
     const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
     const mesh = new THREE.Mesh(
         new THREE.PlaneGeometry(w, h),
         new THREE.MeshBasicMaterial({
@@ -583,7 +584,7 @@ class App {
         // FLOOR / EYE HEIGHT
         // ------------------------------------------------------------
 
-        const FLOOR_OFFSET = 1.8;
+        const FLOOR_OFFSET = 1.7;
 const EYE_HEIGHT = 2;
 const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
 
@@ -591,7 +592,7 @@ this.floorWorldY = FLOOR_OFFSET;
 this.teleportFloorY = 0;
 
 this.panelDistance = 1.4;
-this.panelVerticalOffset = -0.75;
+this.panelVerticalOffset = -0.95;
 
         // 保留你现在正好的 VR 人眼高度。
         // FLOOR_OFFSET = 1.10 继续用于 dolly / 玩家高度。
@@ -1153,6 +1154,7 @@ this.scene.add(this.teleportMarker);
     px.fillText('A Thousand Clocks', CW / 2, 58);
 
     const ptex = new THREE.CanvasTexture(pc);
+    ptex.colorSpace = THREE.SRGBColorSpace;
     const bg = new THREE.Mesh(
         new THREE.PlaneGeometry(1.05, 0.38),
         new THREE.MeshBasicMaterial({
@@ -1312,7 +1314,10 @@ _refreshPanel() {
 
     buttons.forEach((btn) => {
         const ud = btn.userData;
-        ud.draw(ud.hr, ud.hg, ud.hb);
+
+        // NORMAL = 原本颜色
+        ud.draw(ud.nr, ud.ng, ud.nb);
+
         ud.tex.needsUpdate = true;
     });
 }
@@ -1370,36 +1375,130 @@ _refreshPanel() {
 
     return hits.length > 0 ? hits[0] : null;
 }
-    _processController(ctrl, state) {
-    if (!ctrl) return;
+    _processControllers() {
+    const buttons = [
+        this.vrBtnStart,
+        this.vrBtnResume,
+        this.vrBtnRestart,
+        this.vrBtnExit,
+    ].filter((btn) => btn && btn.visible);
 
-    const hit = this._castController(ctrl);
-    const btn = hit ? hit.object : null;
+    const hits = [];
 
-    this._updateRayLine(state.ray, hit ? hit.distance : null);
+    for (let i = 0; i < this.controllers.length; i++) {
+        const ctrl = this.controllers[i];
+        const state = this.ctrlState[i];
 
-    if (state.ray) {
-        state.ray.material.color.set(btn ? 0xffff00 : 0xffffff);
-    }
+        if (!ctrl) {
+            hits.push(null);
+            continue;
+        }
 
-    if (state.hoveredBtn && state.hoveredBtn !== btn) {
-        const ud = state.hoveredBtn.userData;
-        ud.draw(ud.hr, ud.hg, ud.hb);
-        ud.tex.needsUpdate = true;
-        state.hoveredBtn = null;
-    }
+        const hit = this._castController(ctrl);
 
-    if (btn) {
-        if (state.hoveredBtn !== btn) {
-            state.hoveredBtn = btn;
+if (!hit) {
+    console.log(`[UI CLICK ${i}] NO BUTTON`);
+    return;
+}
 
-            const ud = btn.userData;
-            ud.draw(ud.dr, ud.dg, ud.db);
-            ud.tex.needsUpdate = true;
+const action = hit.object.userData.action;
+
+console.log(
+    `[UI CLICK ${i}]`,
+    action,
+    hit.object.name,
+);
+
+        // 射线长度
+        this._updateRayLine(
+            state.ray,
+            hit ? hit.distance : null,
+        );
+
+        // ------------------------------------------------
+        // DEBUG:
+        //
+        // 白色 = 没打到按钮
+        // 绿色 = Raycaster 确实打到按钮
+        // ------------------------------------------------
+
+        if (state.ray) {
+            state.ray.material.color.set(
+                hit ? 0x00ff88 : 0xffffff,
+            );
+        }
+
+        state.hoveredBtn = btn;
+
+        // ------------------------------------------------
+        // DEBUG CONSOLE
+        //
+        // 只有 hit 对象发生改变的时候才打印，
+        // 不会每帧疯狂刷 console。
+        // ------------------------------------------------
+
+        const action = btn?.userData?.action ?? null;
+
+        if (state.debugLastAction !== action) {
+            console.log(
+                `[UI Ray ${i}]`,
+                action ? `HIT → ${action}` : 'NO HIT',
+                hit
+                    ? {
+                          distance: hit.distance.toFixed(3),
+                          point: hit.point
+                              .toArray()
+                              .map((v) => v.toFixed(3)),
+                      }
+                    : '',
+            );
+
+            state.debugLastAction = action;
         }
     }
 
-    state.justFired = false;
+    // ----------------------------------------------------
+    // IMPORTANT:
+    //
+    // 两只 controller 都计算完以后，
+    // 再统一决定哪些按钮应该亮。
+    //
+    // 避免 controller 0 和 controller 1
+    // 互相覆盖按钮状态。
+    // ----------------------------------------------------
+
+    const hoveredButtons = new Set(
+        hits
+            .filter(Boolean)
+            .map((hit) => hit.object),
+    );
+
+    buttons.forEach((btn) => {
+        const ud = btn.userData;
+
+        if (hoveredButtons.has(btn)) {
+
+            // HOVER = 亮
+
+            ud.draw(
+                ud.hr,
+                ud.hg,
+                ud.hb,
+            );
+
+        } else {
+
+            // NORMAL
+
+            ud.draw(
+                ud.nr,
+                ud.ng,
+                ud.nb,
+            );
+        }
+
+        ud.tex.needsUpdate = true;
+    });
 }
 
     // ========================================================================
@@ -1662,8 +1761,7 @@ ctrl.addEventListener('selectstart', async () => {
         // VR CONTROLLERS
         // ------------------------------------------------------------
 
-        this._processController(this.controllers[0], this.ctrlState[0]);
-        this._processController(this.controllers[1], this.ctrlState[1]);
+        this._processControllers();
 
         // ------------------------------------------------------------
         // TELEPORT
