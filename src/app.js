@@ -4,6 +4,7 @@ import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFa
 import Stats from 'three/addons/libs/stats.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
 document.addEventListener('DOMContentLoaded', function () {
     const app = new App();
     window.app = app;
@@ -16,7 +17,7 @@ document.addEventListener('DOMContentLoaded', function () {
 // 设计逻辑：
 //
 // DAW 已经决定音乐时间轴。
-// 所有 Clock_N.wav 都从 0:00 同时开始播放。
+// 所有 Clock_N 音频都从 0:00 同时开始播放。
 //
 // WebXR 只负责：
 //
@@ -28,9 +29,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-// public/audio/Clock_1.wav
-// public/audio/Clock_2.wav
-// public/audio/Clock_3.wav
+// public/audio/Clock_1.mp3
+// public/audio/Clock_2.mp3
+// public/audio/Clock_3.mp3
 // ...
 
 const CLOCK_AUDIO_FOLDER = 'audio';
@@ -46,7 +47,7 @@ const CLOCK_STEM_GAIN = 1.0;
 
 const MASTER_GAIN = 1.0;
 
-// Quest 不要一次同时 decode 太多 WAV。
+// Quest 不要一次同时 decode 太多音频。
 // 一次并行处理 6 个。
 
 const AUDIO_LOAD_CONCURRENCY = 6;
@@ -151,11 +152,11 @@ function createSpatialPanner() {
     panner.panningModel = 'HRTF';
     panner.distanceModel = 'inverse';
 
-    // 1m 左右维持正常声音
+    // 参考距离
 
     panner.refDistance = 4;
 
-    // 超过 60m 基本不继续计算明显距离变化
+    // 超过这个距离基本不继续计算明显距离变化
 
     panner.maxDistance = 40;
 
@@ -169,12 +170,13 @@ function createSpatialPanner() {
     panner.coneInnerAngle = 360;
     panner.coneOuterAngle = 360;
     panner.coneOuterGain = 0;
+
     return panner;
 }
 
 // 每一个 Clock 的 signal flow:
 //
-// WAV
+// Audio File
 // ↓
 // Gain
 // ↓
@@ -187,10 +189,13 @@ function createSpatialPanner() {
 function createClockSpatialChain(outputNode, initialPosition) {
     const gain = audioCtx.createGain();
     const panner = createSpatialPanner();
+
     gain.gain.value = CLOCK_STEM_GAIN;
     gain.connect(panner);
     panner.connect(outputNode);
+
     setImmediatePannerPos(panner, initialPosition);
+
     return {
         gain,
         panner,
@@ -198,13 +203,15 @@ function createClockSpatialChain(outputNode, initialPosition) {
     };
 }
 
-// 加载并 decode 一个真正的 WAV 文件。
+// 加载并 decode 一个真正的音频文件。
 
 async function loadAudioBuffer(url) {
     const response = await fetch(url);
+
     if (!response.ok) {
         throw new Error(`${response.status} ${response.statusText}`);
     }
+
     const arrayBuffer = await response.arrayBuffer();
     return await audioCtx.decodeAudioData(arrayBuffer);
 }
@@ -229,13 +236,17 @@ function setImmediatePannerPos(panner, pos) {
 function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
     const CW = 512;
     const CH = 160;
+
     const canvas = document.createElement('canvas');
     canvas.width = CW;
     canvas.height = CH;
+
     const ctx = canvas.getContext('2d');
+
     function draw(lr, lg, lb) {
         ctx.clearRect(0, 0, CW, CH);
         ctx.fillStyle = `rgb(${lr},${lg},${lb})`;
+
         const R = 28;
         ctx.beginPath();
         ctx.moveTo(R, 0);
@@ -249,18 +260,23 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
         ctx.quadraticCurveTo(0, 0, R, 0);
         ctx.closePath();
         ctx.fill();
+
         ctx.strokeStyle = 'rgba(255,255,255,0.5)';
         ctx.lineWidth = 5;
         ctx.stroke();
+
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 68px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         ctx.fillText(label, CW / 2, CH / 2);
     }
+
     draw(r, g, b);
+
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
+
     const mesh = new THREE.Mesh(
         new THREE.PlaneGeometry(w, h),
         new THREE.MeshBasicMaterial({
@@ -270,6 +286,7 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
             side: THREE.DoubleSide,
         }),
     );
+
     mesh.userData = {
         draw,
         tex,
@@ -284,6 +301,7 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
         db: Math.max(b - 50, 0),
         isBtn: true,
     };
+
     return mesh;
 }
 
@@ -293,13 +311,174 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
 
 class App {
     // ========================================================================
+    // CONSTRUCTOR
+    // ========================================================================
+
+    constructor() {
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+
+        this.teleportDebugFrame = 0;
+
+        // ------------------------------------------------------------
+        // FLOOR / EYE HEIGHT
+        // ------------------------------------------------------------
+        //
+        // FLOOR_OFFSET 用于 dolly / 玩家高度。
+        // teleport 单独使用真正的视觉地面 Y = 0。
+        // ------------------------------------------------------------
+
+        const FLOOR_OFFSET = 1.7;
+        const EYE_HEIGHT = 2;
+        const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
+
+        this.floorWorldY = FLOOR_OFFSET;
+        this.teleportFloorY = 0;
+
+        // ------------------------------------------------------------
+        // VR PANEL PLACEMENT
+        // ------------------------------------------------------------
+
+        this.panelDistance = 1.4;
+        this.panelVerticalOffset = -0.95;
+
+        // ------------------------------------------------------------
+        // TELEPORT STATE
+        // ------------------------------------------------------------
+
+        this.teleportState = [
+            {
+                aiming: false,
+                targetValid: false,
+                targetPoint: new THREE.Vector3(),
+            },
+            {
+                aiming: false,
+                targetValid: false,
+                targetPoint: new THREE.Vector3(),
+            },
+        ];
+
+        // ------------------------------------------------------------
+        // THREE CLOCK
+        //
+        // 现在它只负责普通 render tick。
+        //
+        // 不再负责音乐作品时间轴。
+        // ------------------------------------------------------------
+
+        this.clock = new THREE.Clock();
+
+        // ------------------------------------------------------------
+        // MASTER TIMELINE STATE
+        // ------------------------------------------------------------
+
+        this.running = false;
+        this.timelineStarted = false;
+        this.timelineStartAt = null;
+        this.audioReady = false;
+        this.audioLoading = false;
+        this.audioLoadErrors = [];
+
+        // ------------------------------------------------------------
+        // CAMERA
+        // ------------------------------------------------------------
+
+        this.camera = new THREE.PerspectiveCamera(
+            50,
+            window.innerWidth / window.innerHeight,
+            0.1,
+            200,
+        );
+        this.camera.position.set(0, cameraY, 0);
+
+        // ------------------------------------------------------------
+        // SCENE
+        // ------------------------------------------------------------
+
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(0x101820);
+        this.scene.add(new THREE.HemisphereLight(0xffffff, 0x202020, 0.6));
+
+        const dl = new THREE.DirectionalLight(0xffffff, 2);
+        dl.position.set(1, 3, 2).normalize();
+        this.scene.add(dl);
+
+        // ------------------------------------------------------------
+        // RENDERER
+        // ------------------------------------------------------------
+
+        this.renderer = new THREE.WebGLRenderer({
+            antialias: true,
+        });
+        this.renderer.setPixelRatio(window.devicePixelRatio);
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+        container.appendChild(this.renderer.domElement);
+
+        // ------------------------------------------------------------
+        // DESKTOP CONTROLS
+        // ------------------------------------------------------------
+
+        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        this.controls.target.set(0, cameraY, 0);
+        this.controls.update();
+
+        // ------------------------------------------------------------
+        // DEBUG / RAYCASTER
+        // ------------------------------------------------------------
+
+        this.stats = new Stats();
+        this.rc = new THREE.Raycaster();
+
+        // ------------------------------------------------------------
+        // CONTROLLER STATE
+        // ------------------------------------------------------------
+
+        this.ctrlState = [
+            {
+                selectPressed: false,
+                justFired: false,
+                hoveredBtn: null,
+                debugLastAction: null,
+                ray: null,
+            },
+            {
+                selectPressed: false,
+                justFired: false,
+                hoveredBtn: null,
+                debugLastAction: null,
+                ray: null,
+            },
+        ];
+
+        // ------------------------------------------------------------
+        // INITIALIZE
+        // ------------------------------------------------------------
+
+        this.initScene();
+
+        // 必须先建立 masterGain，
+        // 然后才能给 Clock 创建 panner chain。
+
+        this.setupAudio();
+        this.loadClockModel();
+        this.setupVR();
+
+        window.addEventListener('resize', this.resize.bind(this));
+        this.renderer.setAnimationLoop(this.render.bind(this));
+    }
+
+    // ========================================================================
     // LOAD GLB
     // ========================================================================
 
     loadClockModel() {
         const DEBUG_MESH_INFO = false;
+
         const loader = new GLTFLoader();
         const modelUrl = `${import.meta.env.BASE_URL}models/Thousand Clocks Demo.glb`;
+
         loader.load(
             modelUrl,
 
@@ -316,21 +495,26 @@ class App {
 
                 if (DEBUG_MESH_INFO) {
                     const allMeshInfo = [];
+
                     model.traverse((object) => {
                         if (!object.isMesh) {
                             return;
                         }
-                        const box = new THREE.Box3().setFromObject(object);
-                        const size = new THREE.Vector3();
-                        box.getSize(size);
+
+                        const meshBox = new THREE.Box3().setFromObject(object);
+                        const meshSize = new THREE.Vector3();
+                        meshBox.getSize(meshSize);
+
                         allMeshInfo.push({
                             name: object.name,
                             material: object.material?.name,
-                            maxDim: Math.max(size.x, size.y, size.z),
-                            size,
+                            maxDim: Math.max(meshSize.x, meshSize.y, meshSize.z),
+                            size: meshSize,
                         });
                     });
+
                     allMeshInfo.sort((a, b) => b.maxDim - a.maxDim);
+
                     console.log('模型里一共有', allMeshInfo.length, '个 mesh');
                     console.table(
                         allMeshInfo.slice(0, 10).map((m) => ({
@@ -346,18 +530,22 @@ class App {
                 // --------------------------------------------------------
 
                 const meshesToRemove = [];
+
                 model.traverse((object) => {
                     if (!object.isMesh) {
                         return;
                     }
+
                     const objectInfo = `${object.name} ${object.material?.name || ''}`;
                     const isWorldGrid = /HLOD|MainGrid|ProcGrid|Landscape|Sky|Dome/i.test(
                         objectInfo,
                     );
+
                     if (isWorldGrid) {
                         meshesToRemove.push(object);
                     }
                 });
+
                 meshesToRemove.forEach((object) => {
                     object.parent?.remove(object);
                 });
@@ -369,8 +557,10 @@ class App {
                 const box = new THREE.Box3().setFromObject(model);
                 const size = new THREE.Vector3();
                 const center = new THREE.Vector3();
+
                 box.getSize(size);
                 box.getCenter(center);
+
                 console.log('删除后模型尺寸：', {
                     x: size.x,
                     y: size.y,
@@ -397,9 +587,11 @@ class App {
                 const wrapper = new THREE.Group();
                 wrapper.name = 'ClocksModelWrapper';
                 wrapper.add(model);
+
                 const maxDim = Math.max(size.x, size.y, size.z);
                 const targetSize = 14.0;
                 const scale = targetSize / maxDim;
+
                 wrapper.scale.setScalar(scale);
                 wrapper.position.set(0, 0, 0);
                 this.scene.add(wrapper);
@@ -411,15 +603,19 @@ class App {
                 if (DEBUG_MESH_INFO) {
                     const pickRaycaster = new THREE.Raycaster();
                     const pickMouse = new THREE.Vector2();
+
                     window.addEventListener('click', (event) => {
                         pickMouse.x = (event.clientX / window.innerWidth) * 2 - 1;
                         pickMouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
                         pickRaycaster.setFromCamera(pickMouse, this.camera);
                         const hits = pickRaycaster.intersectObject(wrapper, true);
+
                         if (hits.length > 0) {
                             const obj = hits[0].object;
                             const worldPos = new THREE.Vector3();
                             obj.getWorldPosition(worldPos);
+
                             console.log(
                                 `%c点中了: ${obj.name}`,
                                 'color:#0f0;font-weight:bold',
@@ -442,6 +638,7 @@ class App {
 
                 this.clockRegistry = [];
                 const clockGroups = [];
+
                 model.traverse((object) => {
                     if (/^Clock_\d+$/i.test(object.name)) {
                         clockGroups.push(object);
@@ -457,6 +654,7 @@ class App {
                 // 所以我们手动按数字排序。
 
                 clockGroups.sort((a, b) => getClockNumber(a.name) - getClockNumber(b.name));
+
                 console.log(
                     `找到 ${clockGroups.length} 个钟表 Group：`,
                     clockGroups.map((g) => g.name),
@@ -490,7 +688,7 @@ class App {
                     //
                     // 自动变成：
                     //
-                    // public/audio/Clock_12.wav
+                    // public/audio/Clock_12.mp3
                     // ------------------------------------------------
 
                     const audioUrl =
@@ -572,159 +770,6 @@ class App {
     }
 
     // ========================================================================
-    // CONSTRUCTOR
-    // ========================================================================
-
-    constructor() {
-        const container = document.createElement('div');
-        document.body.appendChild(container);
-        this.teleportDebugFrame = 0;
-
-        // ------------------------------------------------------------
-        // FLOOR / EYE HEIGHT
-        // ------------------------------------------------------------
-
-        const FLOOR_OFFSET = 1.7;
-const EYE_HEIGHT = 2;
-const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
-
-this.floorWorldY = FLOOR_OFFSET;
-this.teleportFloorY = 0;
-
-this.panelDistance = 1.4;
-this.panelVerticalOffset = -0.95;
-
-        // 保留你现在正好的 VR 人眼高度。
-        // FLOOR_OFFSET = 1.10 继续用于 dolly / 玩家高度。
-        //
-        // 但是 teleport 单独使用真正的视觉地面 Y = 0。
-
-        this.teleportFloorY = 0;
-
-        // ------------------------------------------------------------
-        // TELEPORT STATE
-        // ------------------------------------------------------------
-
-        this.teleportState = [
-            {
-                aiming: false,
-                targetValid: false,
-                targetPoint: new THREE.Vector3(),
-            },
-            {
-                aiming: false,
-                targetValid: false,
-                targetPoint: new THREE.Vector3(),
-            },
-        ];
-
-        // ------------------------------------------------------------
-        // THREE CLOCK
-        //
-        // 现在它只负责普通 render tick。
-        //
-        // 不再负责音乐作品时间轴。
-        // ------------------------------------------------------------
-
-        this.clock = new THREE.Clock();
-
-        // ------------------------------------------------------------
-        // MASTER TIMELINE STATE
-        // ------------------------------------------------------------
-
-        this.running = false;
-        this.timelineStarted = false;
-        this.timelineStartAt = null;
-        this.audioReady = false;
-        this.audioLoading = false;
-        this.audioLoadErrors = [];
-
-        // ------------------------------------------------------------
-        // CAMERA
-        // ------------------------------------------------------------
-
-        this.camera = new THREE.PerspectiveCamera(
-            50,
-            window.innerWidth / window.innerHeight,
-            0.1,
-            200,
-        );
-        this.camera.position.set(0, cameraY, 0);
-
-        // ------------------------------------------------------------
-        // SCENE
-        // ------------------------------------------------------------
-
-        this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x101820);
-        this.scene.add(new THREE.HemisphereLight(0xffffff, 0x202020, 0.6));
-        const dl = new THREE.DirectionalLight(0xffffff, 2);
-        dl.position.set(1, 3, 2).normalize();
-        this.scene.add(dl);
-
-        // ------------------------------------------------------------
-        // RENDERER
-        // ------------------------------------------------------------
-
-        this.renderer = new THREE.WebGLRenderer({
-            antialias: true,
-        });
-        this.renderer.setPixelRatio(window.devicePixelRatio);
-        this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-        container.appendChild(this.renderer.domElement);
-
-        // ------------------------------------------------------------
-        // DESKTOP CONTROLS
-        // ------------------------------------------------------------
-
-        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.target.set(0, cameraY, 0);
-        this.controls.update();
-
-        // ------------------------------------------------------------
-        // DEBUG / RAYCASTER
-        // ------------------------------------------------------------
-
-        this.stats = new Stats();
-        this.rc = new THREE.Raycaster();
-
-        // ------------------------------------------------------------
-        // CONTROLLER STATE
-        // ------------------------------------------------------------
-
-        this.ctrlState = [
-            {
-                selectPressed: false,
-                justFired: false,
-                hoveredBtn: null,
-                ray: null,
-            },
-            {
-                selectPressed: false,
-                justFired: false,
-                hoveredBtn: null,
-                ray: null,
-            },
-        ];
-
-        // ------------------------------------------------------------
-        // INITIALIZE
-        // ------------------------------------------------------------
-
-        this.initScene();
-
-        // 必须先建立 masterGain，
-        // 然后才能给 Clock 创建 panner chain。
-
-        this.setupAudio();
-        this.loadClockModel();
-        this.setupVR();
-        window.addEventListener('resize', this.resize.bind(this));
-        this.renderer.setAnimationLoop(this.render.bind(this));
-    }
-
-    // ========================================================================
     // SCENE
     // ========================================================================
 
@@ -741,6 +786,7 @@ this.panelVerticalOffset = -0.95;
         );
         originMarker.position.set(0, 0, 0);
         this.scene.add(originMarker);
+
         const axesHelper = new THREE.AxesHelper(3);
         this.scene.add(axesHelper);
 
@@ -796,20 +842,20 @@ this.panelVerticalOffset = -0.95;
 
         const markerGeo = new THREE.RingGeometry(0.32, 0.48, 48);
 
-const markerMat = new THREE.MeshBasicMaterial({
-    color: 0x00ff88,
-    side: THREE.DoubleSide,
-    transparent: true,
-    opacity: 1,
-    depthTest: false,
-    depthWrite: false,
-});
+        const markerMat = new THREE.MeshBasicMaterial({
+            color: 0x00ff88,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 1,
+            depthTest: false,
+            depthWrite: false,
+        });
 
-this.teleportMarker = new THREE.Mesh(markerGeo, markerMat);
-this.teleportMarker.rotation.x = -Math.PI / 2;
-this.teleportMarker.renderOrder = 1000;
-this.teleportMarker.visible = false;
-this.scene.add(this.teleportMarker);
+        this.teleportMarker = new THREE.Mesh(markerGeo, markerMat);
+        this.teleportMarker.rotation.x = -Math.PI / 2;
+        this.teleportMarker.renderOrder = 1000;
+        this.teleportMarker.visible = false;
+        this.scene.add(this.teleportMarker);
     }
 
     // ========================================================================
@@ -823,27 +869,33 @@ this.scene.add(this.teleportMarker);
     }
 
     // ========================================================================
-    // LOAD ALL CLOCK WAV FILES
+    // LOAD ALL CLOCK AUDIO FILES
     // ========================================================================
 
     async loadClockAudioFiles() {
         if (!this.clockRegistry || this.clockRegistry.length === 0 || this.audioLoading) {
             return;
         }
+
         this.audioLoading = true;
         this.audioReady = false;
         this.audioLoadErrors = [];
+
         const queue = [...this.clockRegistry];
         let loadedCount = 0;
+
         const worker = async () => {
             while (queue.length > 0) {
                 const clockData = queue.shift();
+
                 if (!clockData) {
                     break;
                 }
+
                 try {
                     clockData.audioBuffer = await loadAudioBuffer(clockData.audioUrl);
                     loadedCount++;
+
                     console.log(
                         `[Audio] ${loadedCount}/${this.clockRegistry.length} loaded: ${clockData.name}`,
                     );
@@ -853,6 +905,7 @@ this.scene.add(this.teleportMarker);
                         url: clockData.audioUrl,
                         error,
                     });
+
                     console.error(
                         `[Audio] Failed to load ${clockData.name}:`,
                         clockData.audioUrl,
@@ -861,7 +914,9 @@ this.scene.add(this.teleportMarker);
                 }
             }
         };
+
         const workerCount = Math.min(AUDIO_LOAD_CONCURRENCY, queue.length);
+
         await Promise.all(
             Array.from(
                 {
@@ -870,6 +925,7 @@ this.scene.add(this.teleportMarker);
                 () => worker(),
             ),
         );
+
         this.audioLoading = false;
         this.audioReady =
             this.audioLoadErrors.length === 0 &&
@@ -883,6 +939,7 @@ this.scene.add(this.teleportMarker);
             const durations = this.clockRegistry.map((clockData) => clockData.audioBuffer.duration);
             const minDuration = Math.min(...durations);
             const maxDuration = Math.max(...durations);
+
             console.log(
                 `%c[Audio] READY — ` +
                     `${this.clockRegistry.length} stems decoded. ` +
@@ -912,6 +969,7 @@ this.scene.add(this.teleportMarker);
                 this.audioLoadErrors,
             );
         }
+
         this._refreshPanel();
     }
 
@@ -935,7 +993,7 @@ this.scene.add(this.teleportMarker);
             // ====================================================
             // 最重要的同步点
             //
-            // 每一个 WAV 都收到完全相同的 startAt。
+            // 每一个音频都收到完全相同的 startAt。
             // ====================================================
 
             source.start(startAt, 0);
@@ -974,7 +1032,7 @@ this.scene.add(this.teleportMarker);
         if (!this.audioReady) {
             console.warn(
                 '[Audio] Audio is not ready yet. ' +
-                    'Wait for all Clock_N.wav files to finish loading.',
+                    'Wait for all Clock_N files to finish loading.',
             );
             console.log(this.audioLoadErrors);
             return;
@@ -997,9 +1055,11 @@ this.scene.add(this.teleportMarker);
             // AudioContext timestamp。
 
             const startAt = audioCtx.currentTime + 0.12;
+
             this.timelineStartAt = startAt;
             this._createAndScheduleClockSources(startAt);
             this.timelineStarted = true;
+
             console.log(
                 `%c[Timeline] START scheduled at ${startAt.toFixed(3)}`,
                 'color:#66ccff;font-weight:bold',
@@ -1022,9 +1082,11 @@ this.scene.add(this.teleportMarker);
         if (!this.running) {
             return;
         }
+
         await audioCtx.suspend();
         this.running = false;
         this._refreshPanel();
+
         console.log(`[Timeline] Paused at ` + `${this.getTimelineTime().toFixed(3)} sec`);
     }
 
@@ -1043,9 +1105,12 @@ this.scene.add(this.teleportMarker);
     updateAudioListener() {
         const pos = new THREE.Vector3();
         const fwd = new THREE.Vector3();
+
         this.camera.getWorldPosition(pos);
         this.camera.getWorldDirection(fwd);
+
         const listener = audioCtx.listener;
+
         if (listener.positionX) {
             listener.positionX.value = pos.x;
             listener.positionY.value = pos.y;
@@ -1076,6 +1141,7 @@ this.scene.add(this.teleportMarker);
         // ================================================================
 
         const t = this.getTimelineTime();
+
         this.clockRegistry.forEach((clockData) => {
             // --------------------------------------------------------
             // NOT TIME TO MOVE YET
@@ -1109,7 +1175,7 @@ this.scene.add(this.teleportMarker);
             // --------------------------------------------------------
             // MOVE AUDIO PANNER
             //
-            // WAV 本身一直连续播放。
+            // 音频本身一直连续播放。
             //
             // 这里只是改变它的空间坐标。
             // --------------------------------------------------------
@@ -1124,6 +1190,7 @@ this.scene.add(this.teleportMarker);
         if (!this._timelineDebugFrame) {
             this._timelineDebugFrame = 0;
         }
+
         if (++this._timelineDebugFrame % 180 === 0) {
             console.log(`[Timeline] ${t.toFixed(3)}s`);
         }
@@ -1134,193 +1201,202 @@ this.scene.add(this.teleportMarker);
     // ========================================================================
 
     buildVRPanel() {
-    const CW = 720;
-    const CH = 260;
-    const pc = document.createElement('canvas');
-    pc.width = CW;
-    pc.height = CH;
-    const px = pc.getContext('2d');
+        const CW = 720;
+        const CH = 260;
 
-    px.fillStyle = 'rgba(8,14,26,0.92)';
-    px.roundRect(0, 0, CW, CH, 32);
-    px.fill();
-    px.strokeStyle = 'rgba(255,255,255,0.2)';
-    px.lineWidth = 4;
-    px.roundRect(2, 2, CW - 4, CH - 4, 30);
-    px.stroke();
-    px.fillStyle = 'rgba(255,255,255,0.55)';
-    px.font = '38px sans-serif';
-    px.textAlign = 'center';
-    px.fillText('A Thousand Clocks', CW / 2, 58);
+        const pc = document.createElement('canvas');
+        pc.width = CW;
+        pc.height = CH;
 
-    const ptex = new THREE.CanvasTexture(pc);
-    ptex.colorSpace = THREE.SRGBColorSpace;
-    const bg = new THREE.Mesh(
-        new THREE.PlaneGeometry(1.05, 0.38),
-        new THREE.MeshBasicMaterial({
-            map: ptex,
-            transparent: true,
-            depthTest: false,
-            side: THREE.DoubleSide,
-        }),
-    );
+        const px = pc.getContext('2d');
 
-    this.vrBtnStart = makeButtonMesh('▶  Start', 40, 150, 80);
-    this.vrBtnStart.userData.action = 'start';
+        px.fillStyle = 'rgba(8,14,26,0.92)';
+        px.roundRect(0, 0, CW, CH, 32);
+        px.fill();
 
-    this.vrBtnResume = makeButtonMesh('▶  Resume', 40, 150, 80);
-    this.vrBtnResume.userData.action = 'resume';
+        px.strokeStyle = 'rgba(255,255,255,0.2)';
+        px.lineWidth = 4;
+        px.roundRect(2, 2, CW - 4, CH - 4, 30);
+        px.stroke();
 
-    this.vrBtnRestart = makeButtonMesh('↻  Restart', 175, 110, 35);
-    this.vrBtnRestart.userData.action = 'restart';
+        px.fillStyle = 'rgba(255,255,255,0.55)';
+        px.font = '38px sans-serif';
+        px.textAlign = 'center';
+        px.fillText('A Thousand Clocks', CW / 2, 58);
 
-    this.vrBtnExit = makeButtonMesh('✕  Exit VR', 170, 45, 45);
-    this.vrBtnExit.userData.action = 'exit';
+        const ptex = new THREE.CanvasTexture(pc);
+        ptex.colorSpace = THREE.SRGBColorSpace;
 
-    this.vrPanel = new THREE.Group();
-    this.vrPanel.add(
-        bg,
-        this.vrBtnStart,
-        this.vrBtnResume,
-        this.vrBtnRestart,
-        this.vrBtnExit,
-    );
+        const bg = new THREE.Mesh(
+            new THREE.PlaneGeometry(1.05, 0.38),
+            new THREE.MeshBasicMaterial({
+                map: ptex,
+                transparent: true,
+                depthTest: false,
+                side: THREE.DoubleSide,
+            }),
+        );
 
-    this.vrPanel.visible = false;
-    this.dolly.add(this.vrPanel);
-    this.setPanelMode('initial');
-    this._refreshPanel();
-}
+        this.vrBtnStart = makeButtonMesh('▶  Start', 40, 150, 80);
+        this.vrBtnStart.userData.action = 'start';
 
-setPanelMode(mode) {
-    const initial = mode === 'initial';
+        this.vrBtnResume = makeButtonMesh('▶  Resume', 40, 150, 80);
+        this.vrBtnResume.userData.action = 'resume';
 
-    this.vrBtnStart.visible = initial;
-    this.vrBtnResume.visible = !initial;
-    this.vrBtnRestart.visible = !initial;
-    this.vrBtnExit.visible = true;
+        this.vrBtnRestart = makeButtonMesh('↻  Restart', 175, 110, 35);
+        this.vrBtnRestart.userData.action = 'restart';
 
-    if (initial) {
-        this.vrBtnStart.position.set(-0.17, -0.07, 0.002);
-        this.vrBtnExit.position.set(0.17, -0.07, 0.002);
-    } else {
-        this.vrBtnResume.position.set(-0.32, -0.07, 0.002);
-        this.vrBtnRestart.position.set(0, -0.07, 0.002);
-        this.vrBtnExit.position.set(0.32, -0.07, 0.002);
+        this.vrBtnExit = makeButtonMesh('✕  Exit VR', 170, 45, 45);
+        this.vrBtnExit.userData.action = 'exit';
+
+        this.vrPanel = new THREE.Group();
+        this.vrPanel.add(
+            bg,
+            this.vrBtnStart,
+            this.vrBtnResume,
+            this.vrBtnRestart,
+            this.vrBtnExit,
+        );
+
+        this.vrPanel.visible = false;
+        this.dolly.add(this.vrPanel);
+
+        this.setPanelMode('initial');
+        this._refreshPanel();
     }
 
-    this._refreshPanel();
-}
+    setPanelMode(mode) {
+        const initial = mode === 'initial';
 
-showVRPanel() {
-    if (!this.vrPanel) return;
+        this.vrBtnStart.visible = initial;
+        this.vrBtnResume.visible = !initial;
+        this.vrBtnRestart.visible = !initial;
+        this.vrBtnExit.visible = true;
 
-    const headPos = new THREE.Vector3();
-    const forward = new THREE.Vector3();
+        if (initial) {
+            this.vrBtnStart.position.set(-0.17, -0.07, 0.002);
+            this.vrBtnExit.position.set(0.17, -0.07, 0.002);
+        } else {
+            this.vrBtnResume.position.set(-0.32, -0.07, 0.002);
+            this.vrBtnRestart.position.set(0, -0.07, 0.002);
+            this.vrBtnExit.position.set(0.32, -0.07, 0.002);
+        }
 
-    this.camera.getWorldPosition(headPos);
-    this.camera.getWorldDirection(forward);
+        this._refreshPanel();
+    }
 
-    forward.y = 0;
-    if (forward.lengthSq() < 0.0001) forward.set(0, 0, -1);
-    forward.normalize();
+    showVRPanel() {
+        if (!this.vrPanel) {
+            return;
+        }
 
-    const panelWorldPos = headPos.clone().addScaledVector(forward, this.panelDistance);
-    panelWorldPos.y = headPos.y + this.panelVerticalOffset;
+        const headPos = new THREE.Vector3();
+        const forward = new THREE.Vector3();
 
-    this.vrPanel.position.copy(this.dolly.worldToLocal(panelWorldPos.clone()));
-    this.vrPanel.rotation.set(0, Math.atan2(-forward.x, -forward.z), 0);
+        this.camera.getWorldPosition(headPos);
+        this.camera.getWorldDirection(forward);
 
-    this.ctrlState.forEach((state) => {
-        state.hoveredBtn = null;
-    });
+        forward.y = 0;
 
-    this._refreshPanel();
-    this.vrPanel.visible = true;
-}
+        if (forward.lengthSq() < 0.0001) {
+            forward.set(0, 0, -1);
+        }
 
-hideVRPanel() {
-    if (this.vrPanel) this.vrPanel.visible = false;
-}
+        forward.normalize();
 
-async pauseAndShowMenu() {
-    if (this.running) await this.stopAudio();
+        const panelWorldPos = headPos.clone().addScaledVector(forward, this.panelDistance);
+        panelWorldPos.y = headPos.y + this.panelVerticalOffset;
 
-    this.setPanelMode(
-        this.timelineStarted ? 'paused' : 'initial',
-    );
+        this.vrPanel.position.copy(this.dolly.worldToLocal(panelWorldPos.clone()));
+        this.vrPanel.rotation.set(0, Math.atan2(-forward.x, -forward.z), 0);
 
-    this.showVRPanel();
-}
+        this.ctrlState.forEach((state) => {
+            state.hoveredBtn = null;
+        });
 
-resetExperience() {
-    if (this.clockRegistry) {
-        this.clockRegistry.forEach((clockData) => {
-            const source = clockData.audioNode.source;
+        this._refreshPanel();
+        this.vrPanel.visible = true;
+    }
 
-            if (source) {
-                try {
-                    source.stop();
-                } catch (_) {}
+    hideVRPanel() {
+        if (this.vrPanel) {
+            this.vrPanel.visible = false;
+        }
+    }
 
-                try {
-                    source.disconnect();
-                } catch (_) {}
+    async pauseAndShowMenu() {
+        if (this.running) {
+            await this.stopAudio();
+        }
 
-                clockData.audioNode.source = null;
-            }
+        this.setPanelMode(this.timelineStarted ? 'paused' : 'initial');
+        this.showVRPanel();
+    }
 
-            clockData.object.position.copy(
-                clockData.originalPosition,
-            );
+    resetExperience() {
+        if (this.clockRegistry) {
+            this.clockRegistry.forEach((clockData) => {
+                const source = clockData.audioNode.source;
 
-            setImmediatePannerPos(
-                clockData.audioNode.panner,
-                clockData.originalPosition,
-            );
+                if (source) {
+                    try {
+                        source.stop();
+                    } catch (_) {}
+
+                    try {
+                        source.disconnect();
+                    } catch (_) {}
+
+                    clockData.audioNode.source = null;
+                }
+
+                clockData.object.position.copy(clockData.originalPosition);
+
+                setImmediatePannerPos(clockData.audioNode.panner, clockData.originalPosition);
+            });
+        }
+
+        this.running = false;
+        this.timelineStarted = false;
+        this.timelineStartAt = null;
+        this._timelineDebugFrame = 0;
+    }
+
+    async restartAudio() {
+        this.resetExperience();
+        await this.startAudio();
+    }
+
+    async exitVR() {
+        if (this.running) {
+            await this.stopAudio();
+        }
+
+        this.resetExperience();
+
+        const session = this.renderer.xr.getSession();
+
+        if (session) {
+            await session.end();
+        }
+    }
+
+    _refreshPanel() {
+        const buttons = [
+            this.vrBtnStart,
+            this.vrBtnResume,
+            this.vrBtnRestart,
+            this.vrBtnExit,
+        ].filter(Boolean);
+
+        buttons.forEach((btn) => {
+            const ud = btn.userData;
+
+            // NORMAL = 原本颜色
+            ud.draw(ud.nr, ud.ng, ud.nb);
+            ud.tex.needsUpdate = true;
         });
     }
-
-    this.running = false;
-    this.timelineStarted = false;
-    this.timelineStartAt = null;
-    this._timelineDebugFrame = 0;
-}
-
-async restartAudio() {
-    this.resetExperience();
-    await this.startAudio();
-}
-
-async exitVR() {
-    if (this.running) await this.stopAudio();
-
-    this.resetExperience();
-
-    const session = this.renderer.xr.getSession();
-
-    if (session) {
-        await session.end();
-    }
-}
-
-_refreshPanel() {
-    const buttons = [
-        this.vrBtnStart,
-        this.vrBtnResume,
-        this.vrBtnRestart,
-        this.vrBtnExit,
-    ].filter(Boolean);
-
-    buttons.forEach((btn) => {
-        const ud = btn.userData;
-
-        // NORMAL = 原本颜色
-        ud.draw(ud.nr, ud.ng, ud.nb);
-
-        ud.tex.needsUpdate = true;
-    });
-}
 
     // ========================================================================
     // CONTROLLER RAY
@@ -1330,6 +1406,7 @@ _refreshPanel() {
         const geo = new THREE.BufferGeometry();
         const positions = new Float32Array([0, 0, 0, 0, 0, -2]);
         geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
         const mat = new THREE.LineBasicMaterial({
             color: 0xffffff,
             linewidth: 2,
@@ -1337,169 +1414,136 @@ _refreshPanel() {
             opacity: 0.7,
             depthTest: false,
         });
+
         const line = new THREE.Line(geo, mat);
         line.renderOrder = 999;
         ctrl.add(line);
+
         return line;
     }
+
     _updateRayLine(ray, hitDistance) {
         if (!ray) {
             return;
         }
+
         const pos = ray.geometry.attributes.position;
         pos.setZ(1, hitDistance ? -hitDistance : -2);
         pos.needsUpdate = true;
     }
-   _castController(ctrl) {
-    if (!ctrl || !this.vrPanel || !this.vrPanel.visible) return null;
 
-    const origin = new THREE.Vector3();
-    const direction = new THREE.Vector3();
-
-    ctrl.getWorldPosition(origin);
-    direction
-        .set(0, 0, -1)
-        .transformDirection(ctrl.matrixWorld)
-        .normalize();
-
-    this.rc.set(origin, direction);
-
-    const buttons = [
-        this.vrBtnStart,
-        this.vrBtnResume,
-        this.vrBtnRestart,
-        this.vrBtnExit,
-    ].filter((btn) => btn && btn.visible);
-
-    const hits = this.rc.intersectObjects(buttons, false);
-
-    return hits.length > 0 ? hits[0] : null;
-}
-    _processControllers() {
-    const buttons = [
-        this.vrBtnStart,
-        this.vrBtnResume,
-        this.vrBtnRestart,
-        this.vrBtnExit,
-    ].filter((btn) => btn && btn.visible);
-
-    const hits = [];
-
-    for (let i = 0; i < this.controllers.length; i++) {
-        const ctrl = this.controllers[i];
-        const state = this.ctrlState[i];
-
-        if (!ctrl) {
-            hits.push(null);
-            continue;
+    _castController(ctrl) {
+        if (!ctrl || !this.vrPanel || !this.vrPanel.visible) {
+            return null;
         }
 
-        const hit = this._castController(ctrl);
+        const origin = new THREE.Vector3();
+        const direction = new THREE.Vector3();
 
-if (!hit) {
-    console.log(`[UI CLICK ${i}] NO BUTTON`);
-    return;
-}
+        ctrl.getWorldPosition(origin);
+        direction.set(0, 0, -1).transformDirection(ctrl.matrixWorld).normalize();
 
-const action = hit.object.userData.action;
+        this.rc.set(origin, direction);
 
-console.log(
-    `[UI CLICK ${i}]`,
-    action,
-    hit.object.name,
-);
+        const buttons = [
+            this.vrBtnStart,
+            this.vrBtnResume,
+            this.vrBtnRestart,
+            this.vrBtnExit,
+        ].filter((btn) => btn && btn.visible);
 
-        // 射线长度
-        this._updateRayLine(
-            state.ray,
-            hit ? hit.distance : null,
-        );
+        const hits = this.rc.intersectObjects(buttons, false);
 
-        // ------------------------------------------------
-        // DEBUG:
-        //
-        // 白色 = 没打到按钮
-        // 绿色 = Raycaster 确实打到按钮
-        // ------------------------------------------------
-
-        if (state.ray) {
-            state.ray.material.color.set(
-                hit ? 0x00ff88 : 0xffffff,
-            );
-        }
-
-        state.hoveredBtn = btn;
-
-        // ------------------------------------------------
-        // DEBUG CONSOLE
-        //
-        // 只有 hit 对象发生改变的时候才打印，
-        // 不会每帧疯狂刷 console。
-        // ------------------------------------------------
-
-        const action = btn?.userData?.action ?? null;
-
-        if (state.debugLastAction !== action) {
-            console.log(
-                `[UI Ray ${i}]`,
-                action ? `HIT → ${action}` : 'NO HIT',
-                hit
-                    ? {
-                          distance: hit.distance.toFixed(3),
-                          point: hit.point
-                              .toArray()
-                              .map((v) => v.toFixed(3)),
-                      }
-                    : '',
-            );
-
-            state.debugLastAction = action;
-        }
+        return hits.length > 0 ? hits[0] : null;
     }
 
-    // ----------------------------------------------------
-    // IMPORTANT:
-    //
-    // 两只 controller 都计算完以后，
-    // 再统一决定哪些按钮应该亮。
-    //
-    // 避免 controller 0 和 controller 1
-    // 互相覆盖按钮状态。
-    // ----------------------------------------------------
+    _processControllers() {
+        const buttons = [
+            this.vrBtnStart,
+            this.vrBtnResume,
+            this.vrBtnRestart,
+            this.vrBtnExit,
+        ].filter((btn) => btn && btn.visible);
 
-    const hoveredButtons = new Set(
-        hits
-            .filter(Boolean)
-            .map((hit) => hit.object),
-    );
+        const hits = [];
 
-    buttons.forEach((btn) => {
-        const ud = btn.userData;
+        for (let i = 0; i < this.controllers.length; i++) {
+            const ctrl = this.controllers[i];
+            const state = this.ctrlState[i];
 
-        if (hoveredButtons.has(btn)) {
+            if (!ctrl) {
+                hits.push(null);
+                continue;
+            }
 
-            // HOVER = 亮
+            const hit = this._castController(ctrl);
+            hits.push(hit);
 
-            ud.draw(
-                ud.hr,
-                ud.hg,
-                ud.hb,
-            );
+            const btn = hit ? hit.object : null;
 
-        } else {
+            // ------------------------------------------------
+            // 射线长度
+            // ------------------------------------------------
 
-            // NORMAL
+            this._updateRayLine(state.ray, hit ? hit.distance : null);
 
-            ud.draw(
-                ud.nr,
-                ud.ng,
-                ud.nb,
-            );
+            // ------------------------------------------------
+            // 白色 = 没碰到按钮
+            // 绿色 = 碰到按钮
+            // ------------------------------------------------
+
+            if (state.ray) {
+                state.ray.material.color.set(hit ? 0x00ff88 : 0xffffff);
+            }
+
+            state.hoveredBtn = btn;
+
+            // ------------------------------------------------
+            // DEBUG
+            // 只在 hit 状态改变时打印
+            //
+            // 注意变量名是 hoveredAction，
+            // 不能叫 action —— 会和别处的 const action 冲突。
+            // ------------------------------------------------
+
+            const hoveredAction = btn?.userData?.action ?? null;
+
+            if (state.debugLastAction !== hoveredAction) {
+                console.log(
+                    `[UI Ray ${i}]`,
+                    hoveredAction ? `HIT → ${hoveredAction}` : 'NO HIT',
+                    hit
+                        ? {
+                              distance: hit.distance.toFixed(3),
+                              point: hit.point.toArray().map((v) => v.toFixed(3)),
+                          }
+                        : '',
+                );
+
+                state.debugLastAction = hoveredAction;
+            }
         }
 
-        ud.tex.needsUpdate = true;
-    });
-}
+        // ----------------------------------------------------
+        // 两只手都检查完以后统一更新按钮颜色
+        // ----------------------------------------------------
+
+        const hoveredButtons = new Set(hits.filter(Boolean).map((hit) => hit.object));
+
+        buttons.forEach((btn) => {
+            const ud = btn.userData;
+
+            if (hoveredButtons.has(btn)) {
+                // hover = 亮
+                ud.draw(ud.hr, ud.hg, ud.hb);
+            } else {
+                // normal
+                ud.draw(ud.nr, ud.ng, ud.nb);
+            }
+
+            ud.tex.needsUpdate = true;
+        });
+    }
 
     // ========================================================================
     // TELEPORT
@@ -1509,39 +1553,42 @@ console.log(
         for (let i = 0; i < this.controllers.length; i++) {
             const ctrl = this.controllers[i];
             const ts = this.teleportState[i];
+
             if (!ctrl || !ts.aiming) {
                 continue;
             }
+
             const origin = new THREE.Vector3();
             const direction = new THREE.Vector3();
+
             ctrl.getWorldPosition(origin);
             direction.set(0, 0, -1).transformDirection(ctrl.matrixWorld).normalize();
 
             // --------------------------------------------------------
             // INTERSECT REAL VISIBLE FLOOR
             //
-            // 玩家高度仍然有 +1.10m offset，
+            // 玩家高度仍然有 offset，
             // 但是 teleport 要射向真正的地面 Y = 0。
             // --------------------------------------------------------
 
             if (direction.y < -0.001) {
                 const t = (this.teleportFloorY - origin.y) / direction.y;
-                if (t > 0 && t <= 12) {
-    ts.targetPoint.copy(origin).addScaledVector(direction, t);
-    ts.targetValid = true;
 
-    if (++this.teleportDebugFrame % 60 === 0) {
-        console.log(
-            '[Teleport target]',
-            ts.targetPoint.x.toFixed(2),
-            ts.targetPoint.y.toFixed(2),
-            ts.targetPoint.z.toFixed(2),
-        );
-    }
-} else {
-    ts.targetValid = false;
-}            
-                
+                if (t > 0 && t <= 12) {
+                    ts.targetPoint.copy(origin).addScaledVector(direction, t);
+                    ts.targetValid = true;
+
+                    if (++this.teleportDebugFrame % 60 === 0) {
+                        console.log(
+                            '[Teleport target]',
+                            ts.targetPoint.x.toFixed(2),
+                            ts.targetPoint.y.toFixed(2),
+                            ts.targetPoint.z.toFixed(2),
+                        );
+                    }
+                } else {
+                    ts.targetValid = false;
+                }
             } else {
                 ts.targetValid = false;
             }
@@ -1565,6 +1612,7 @@ console.log(
 
                 const teleportDistance = origin.distanceTo(ts.targetPoint);
                 this._updateRayLine(this.ctrlState[i].ray, teleportDistance);
+
                 if (this.ctrlState[i].ray) {
                     this.ctrlState[i].ray.material.color.set(0x00ff88);
                 }
@@ -1595,61 +1643,72 @@ console.log(
         this.dolly.position.set(0, 0, 0);
         this.dolly.add(this.camera);
         this.scene.add(this.dolly);
-this.renderer.xr.addEventListener('sessionstart', () => {
-    this.controls.enabled = false;
-    this.dolly.position.y = this.floorWorldY;
 
-    this.setPanelMode('initial');
-    this.showVRPanel();
-});
+        this.renderer.xr.addEventListener('sessionstart', () => {
+            this.controls.enabled = false;
+            this.dolly.position.y = this.floorWorldY;
 
-this.renderer.xr.addEventListener('sessionend', async () => {
-    this.controls.enabled = true;
-    this.hideVRPanel();
+            this.setPanelMode('initial');
+            this.showVRPanel();
+        });
 
-    if (this.running) {
-        await this.stopAudio();
-    }
+        this.renderer.xr.addEventListener('sessionend', async () => {
+            this.controls.enabled = true;
+            this.hideVRPanel();
 
-    this.resetExperience();
-    this.dolly.position.y = 0;
-});
+            if (this.running) {
+                await this.stopAudio();
+            }
+
+            this.resetExperience();
+            this.dolly.position.y = 0;
+        });
 
         // ------------------------------------------------------------
         // CONTROLLERS
         // ------------------------------------------------------------
 
         this.controllers = [this.renderer.xr.getController(0), this.renderer.xr.getController(1)];
+
         this.controllers.forEach((ctrl, i) => {
             // ----------------------------------------------------
             // TRIGGER
             // ----------------------------------------------------
-ctrl.addEventListener('selectstart', async () => {
-    this.ctrlState[i].selectPressed = true;
-    this.ctrlState[i].justFired = true;
 
-    if (!this.vrPanel.visible) {
-        this.ctrlState[i].justFired = false;
-        await this.pauseAndShowMenu();
-        return;
-    }
+            ctrl.addEventListener('selectstart', async () => {
+                this.ctrlState[i].selectPressed = true;
+                this.ctrlState[i].justFired = true;
 
-    const hit = this._castController(ctrl);
+                // 面板没显示的时候，扳机 = 暂停并呼出菜单
 
-    if (!hit) return;
+                if (!this.vrPanel.visible) {
+                    this.ctrlState[i].justFired = false;
+                    await this.pauseAndShowMenu();
+                    return;
+                }
 
-    const action = hit.object.userData.action;
+                const hit = this._castController(ctrl);
 
-    if (action === 'start') {
-        await this.startAudio();
-    } else if (action === 'resume') {
-        await this.startAudio();
-    } else if (action === 'restart') {
-        await this.restartAudio();
-    } else if (action === 'exit') {
-        await this.exitVR();
-    }
-});
+                if (!hit) {
+                    console.log(`[UI CLICK ${i}] NO BUTTON`);
+                    return;
+                }
+
+                const clickedAction = hit.object.userData.action;
+
+                console.log(`[UI CLICK ${i}] → ${clickedAction}`);
+
+                if (clickedAction === 'start') {
+                    await this.startAudio();
+                } else if (clickedAction === 'resume') {
+                    await this.startAudio();
+                } else if (clickedAction === 'restart') {
+                    await this.restartAudio();
+                } else if (clickedAction === 'exit') {
+                    await this.exitVR();
+                }
+            });
+
             ctrl.addEventListener('selectend', () => {
                 this.ctrlState[i].selectPressed = false;
             });
@@ -1660,19 +1719,22 @@ ctrl.addEventListener('selectstart', async () => {
 
             ctrl.addEventListener('squeezestart', () => {
                 console.log(`[Teleport] Grip ${i} pressed`);
+
                 const ts = this.teleportState[i];
                 ts.aiming = true;
                 ts.targetValid = false;
             });
+
             ctrl.addEventListener('squeezeend', () => {
                 const ts = this.teleportState[i];
+
                 if (ts.aiming && ts.targetValid) {
                     // ------------------------------------------------
                     // IMPORTANT:
                     //
                     // 不改变 dolly.position.y。
                     //
-                    // 所以你的 +1.10m 高度补偿完全保留。
+                    // 所以高度补偿完全保留。
                     //
                     // 我们只移动 X / Z。
                     // ------------------------------------------------
@@ -1696,6 +1758,7 @@ ctrl.addEventListener('selectstart', async () => {
                     this.dolly.position.x += ts.targetPoint.x - headPosition.x;
                     this.dolly.position.z += ts.targetPoint.z - headPosition.z;
                 }
+
                 ts.aiming = false;
                 this.teleportMarker.visible = false;
             });
@@ -1707,19 +1770,23 @@ ctrl.addEventListener('selectstart', async () => {
             ctrl.addEventListener('connected', () => {
                 const grip = this.renderer.xr.getControllerGrip(i);
                 const factory = new XRControllerModelFactory();
+
                 if (grip.children.length === 0) {
                     grip.add(factory.createControllerModel(grip));
                 }
+
                 if (!this.ctrlState[i].ray) {
                     this.ctrlState[i].ray = this._buildRayLine(ctrl);
                 }
             });
+
             ctrl.addEventListener('disconnected', () => {
                 if (this.ctrlState[i].ray) {
                     ctrl.remove(this.ctrlState[i].ray);
                     this.ctrlState[i].ray = null;
                 }
             });
+
             this.dolly.add(ctrl);
         });
 
@@ -1728,11 +1795,14 @@ ctrl.addEventListener('selectstart', async () => {
         // ------------------------------------------------------------
 
         this.grips = [this.renderer.xr.getControllerGrip(0), this.renderer.xr.getControllerGrip(1)];
+
         const factory = new XRControllerModelFactory();
+
         this.grips.forEach((grip) => {
             grip.add(factory.createControllerModel(grip));
             this.dolly.add(grip);
         });
+
         this.buildVRPanel();
     }
 
