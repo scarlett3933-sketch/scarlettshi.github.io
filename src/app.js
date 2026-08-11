@@ -583,7 +583,7 @@ class App {
         // FLOOR / EYE HEIGHT
         // ------------------------------------------------------------
 
-        const FLOOR_OFFSET = 1.5;
+        const FLOOR_OFFSET = 1.8;
 const EYE_HEIGHT = 2;
 const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
 
@@ -591,7 +591,7 @@ this.floorWorldY = FLOOR_OFFSET;
 this.teleportFloorY = 0;
 
 this.panelDistance = 1.4;
-this.panelVerticalOffset = -0.55;
+this.panelVerticalOffset = -0.75;
 
         // 保留你现在正好的 VR 人眼高度。
         // FLOOR_OFFSET = 1.10 继续用于 dolly / 玩家高度。
