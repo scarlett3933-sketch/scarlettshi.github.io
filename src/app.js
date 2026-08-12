@@ -1505,34 +1505,127 @@ this.vrBtnExit.position.set(0.32, -0.07, 0.01);
     // ========================================================================
 
     _buildRayLine(ctrl) {
-        const geo = new THREE.BufferGeometry();
-        const positions = new Float32Array([0, 0, 0, 0, 0, -2]);
-        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    // ============================================================
+    // RAY LINE
+    // ============================================================
 
-        const mat = new THREE.LineBasicMaterial({
-            color: 0xffffff,
-            linewidth: 2,
-            transparent: true,
-            opacity: 0.7,
-            depthTest: false,
-        });
+    const geo = new THREE.BufferGeometry();
 
-        const line = new THREE.Line(geo, mat);
-        line.renderOrder = 999;
-        ctrl.add(line);
+    const positions = new Float32Array([
+        0, 0, 0,
+        0, 0, -2,
+    ]);
 
-        return line;
-    }
+    geo.setAttribute(
+        'position',
+        new THREE.BufferAttribute(positions, 3),
+    );
+
+    const mat = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        linewidth: 2,
+        transparent: true,
+        opacity: 0.7,
+        depthTest: false,
+    });
+
+    const line = new THREE.Line(geo, mat);
+
+    line.renderOrder = 999;
+
+    ctrl.add(line);
+
+
+    // ============================================================
+    // RAY ENDPOINT CURSOR
+    //
+    // Meta-style small sphere at the end of the ray
+    // ============================================================
+
+    const cursorGeometry = new THREE.SphereGeometry(
+        0.018,     // radius = 1.8 cm
+        16,
+        16,
+    );
+
+    const cursorMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.95,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+    });
+
+    const cursor = new THREE.Mesh(
+        cursorGeometry,
+        cursorMaterial,
+    );
+
+    // 默认 ray 长度 = 2m
+    cursor.position.set(
+        0,
+        0,
+        -2,
+    );
+
+    cursor.renderOrder = 1000;
+
+    ctrl.add(cursor);
+
+
+    // 把 cursor 存在 ray 上，
+    // 以后 update ray length 的时候一起移动。
+    line.userData.cursor = cursor;
+
+
+    return line;
+}
 
     _updateRayLine(ray, hitDistance) {
-        if (!ray) {
-            return;
-        }
-
-        const pos = ray.geometry.attributes.position;
-        pos.setZ(1, hitDistance ? -hitDistance : -2);
-        pos.needsUpdate = true;
+    if (!ray) {
+        return;
     }
+
+    // 有 hit → endpoint 到 hit position
+    // 没有 hit → 默认 2 meters
+    const distance =
+        hitDistance !== null &&
+        hitDistance !== undefined
+            ? hitDistance
+            : 2;
+
+
+    // ============================================================
+    // UPDATE LINE END
+    // ============================================================
+
+    const pos =
+        ray.geometry.attributes.position;
+
+    pos.setZ(
+        1,
+        -distance,
+    );
+
+    pos.needsUpdate = true;
+
+
+    // ============================================================
+    // UPDATE CURSOR POSITION
+    // ============================================================
+
+    const cursor =
+        ray.userData.cursor;
+
+    if (cursor) {
+        cursor.position.set(
+            0,
+            0,
+            -distance,
+        );
+    }
+}
 
     _castController(ctrl) {
         if (!ctrl || !this.vrPanel || !this.vrPanel.visible) {
@@ -1595,8 +1688,26 @@ this.vrBtnExit.position.set(0.32, -0.07, 0.01);
             // ------------------------------------------------
 
             if (state.ray) {
-                state.ray.material.color.set(hit ? 0x00ff88 : 0xffffff);
-            }
+    const rayColor =
+        hit
+            ? 0x00ff88
+            : 0xffffff;
+
+    // ray
+    state.ray.material.color.set(
+        rayColor
+    );
+
+    // endpoint cursor
+    const cursor =
+        state.ray.userData.cursor;
+
+    if (cursor) {
+        cursor.material.color.set(
+            rayColor
+        );
+    }
+}
 
             state.hoveredBtn = btn;
 
@@ -1720,8 +1831,23 @@ this.vrBtnExit.position.set(0.32, -0.07, 0.01);
                 this._updateRayLine(this.ctrlState[i].ray, teleportDistance);
 
                 if (this.ctrlState[i].ray) {
-                    this.ctrlState[i].ray.material.color.set(0x00ff88);
-                }
+
+    const ray =
+        this.ctrlState[i].ray;
+
+    ray.material.color.set(
+        0x00ff88
+    );
+
+    const cursor =
+        ray.userData.cursor;
+
+    if (cursor) {
+        cursor.material.color.set(
+            0x00ff88
+        );
+    }
+}
             } else {
                 this.teleportMarker.visible = false;
             }
