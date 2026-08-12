@@ -287,19 +287,44 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
         }),
     );
 
+    // ------------------------------------------------------------
+    // 三种状态的颜色
+    //
+    // normal  = 最亮   （手没指过来）
+    // hover   = 变暗   （射线指到了）
+    // pressed = 最暗   （扳机按下去）
+    //
+    // 注意方向：
+    // 以前是 hover 更亮，所以 normal 看起来永远是暗的。
+    // 现在反过来。
+    // ------------------------------------------------------------
+
+    const dim = (v, k) => Math.max(Math.round(v * k), 0);
+
     mesh.userData = {
         draw,
         tex,
+        isBtn: true,
+
+        // 当前正在显示哪个状态。
+        // 用来避免每一帧都重画 canvas。
+
+        visualState: null,
+
+        // NORMAL
         nr: r,
         ng: g,
         nb: b,
-        hr: Math.min(r + 60, 255),
-        hg: Math.min(g + 60, 255),
-        hb: Math.min(b + 60, 255),
-        dr: Math.max(r - 50, 0),
-        dg: Math.max(g - 50, 0),
-        db: Math.max(b - 50, 0),
-        isBtn: true,
+
+        // HOVER
+        hr: dim(r, 0.62),
+        hg: dim(g, 0.62),
+        hb: dim(b, 0.62),
+
+        // PRESSED
+        dr: dim(r, 0.38),
+        dg: dim(g, 0.38),
+        db: dim(b, 0.38),
     };
 
     return mesh;
@@ -328,8 +353,25 @@ class App {
         // teleport 单独使用真正的视觉地面 Y = 0。
         // ------------------------------------------------------------
 
-        const FLOOR_OFFSET = 1.7;
-        const EYE_HEIGHT = 2;
+        // FLOOR_OFFSET = 0
+        //
+        // 因为我们用的是 local-floor reference space。
+        //
+        // Quest 已经自己知道你的眼睛离真实地面多高，
+        // 而模型地板也已经对齐到世界坐标 y = 0。
+        //
+        // 所以这里再加任何数值，
+        // 都等于把人整个抬到空中。
+        //
+        // 如果以后发现还是偏高 / 偏低，
+        // 只改这一个数字就够了。
+
+        const FLOOR_OFFSET = 0;
+
+        // 桌面端（非 VR）的相机高度。
+        // 进入 VR 后这个值会被 WebXR 覆盖。
+
+        const EYE_HEIGHT = 1.6;
         const cameraY = EYE_HEIGHT + FLOOR_OFFSET;
 
         this.floorWorldY = FLOOR_OFFSET;
@@ -338,9 +380,12 @@ class App {
         // ------------------------------------------------------------
         // VR PANEL PLACEMENT
         // ------------------------------------------------------------
+        //
+        // 面板放在视线略下方，
+        // 不用低头也不用抬头。
 
-        this.panelDistance = 1.4;
-        this.panelVerticalOffset = -0.95;
+        this.panelDistance = 1.2;
+        this.panelVerticalOffset = -0.25;
 
         // ------------------------------------------------------------
         // TELEPORT STATE
@@ -440,6 +485,7 @@ class App {
                 selectPressed: false,
                 justFired: false,
                 hoveredBtn: null,
+                pressedBtn: null,
                 debugLastAction: null,
                 ray: null,
             },
@@ -447,6 +493,7 @@ class App {
                 selectPressed: false,
                 justFired: false,
                 hoveredBtn: null,
+                pressedBtn: null,
                 debugLastAction: null,
                 ray: null,
             },
@@ -1237,16 +1284,19 @@ class App {
             }),
         );
 
-        this.vrBtnStart = makeButtonMesh('▶  Start', 40, 150, 80);
+        // 基础色 = NORMAL 状态（最亮）。
+        // hover / pressed 会自动在这个基础上变暗。
+
+        this.vrBtnStart = makeButtonMesh('▶  Start', 60, 200, 115);
         this.vrBtnStart.userData.action = 'start';
 
-        this.vrBtnResume = makeButtonMesh('▶  Resume', 40, 150, 80);
+        this.vrBtnResume = makeButtonMesh('▶  Resume', 60, 200, 115);
         this.vrBtnResume.userData.action = 'resume';
 
-        this.vrBtnRestart = makeButtonMesh('↻  Restart', 175, 110, 35);
+        this.vrBtnRestart = makeButtonMesh('↻  Restart', 230, 155, 55);
         this.vrBtnRestart.userData.action = 'restart';
 
-        this.vrBtnExit = makeButtonMesh('✕  Exit VR', 170, 45, 45);
+        this.vrBtnExit = makeButtonMesh('✕  Exit VR', 225, 75, 75);
         this.vrBtnExit.userData.action = 'exit';
 
         this.vrPanel = new THREE.Group();
@@ -1381,20 +1431,56 @@ class App {
         }
     }
 
-    _refreshPanel() {
-        const buttons = [
+    // ------------------------------------------------------------
+    // 把一个按钮画成指定状态。
+    //
+    // mode = 'normal' | 'hover' | 'pressed'
+    //
+    // 只有状态真的变了才重画 canvas。
+    // 否则 Quest 会每一帧重传 4 张贴图。
+    // ------------------------------------------------------------
+
+    _setButtonVisual(btn, mode) {
+        if (!btn) {
+            return;
+        }
+
+        const ud = btn.userData;
+
+        if (ud.visualState === mode) {
+            return;
+        }
+
+        if (mode === 'pressed') {
+            ud.draw(ud.dr, ud.dg, ud.db);
+        } else if (mode === 'hover') {
+            ud.draw(ud.hr, ud.hg, ud.hb);
+        } else {
+            ud.draw(ud.nr, ud.ng, ud.nb);
+        }
+
+        ud.tex.needsUpdate = true;
+        ud.visualState = mode;
+    }
+
+    _panelButtons() {
+        return [
             this.vrBtnStart,
             this.vrBtnResume,
             this.vrBtnRestart,
             this.vrBtnExit,
         ].filter(Boolean);
+    }
 
-        buttons.forEach((btn) => {
-            const ud = btn.userData;
+    // 把所有按钮重置回 NORMAL（最亮）。
 
-            // NORMAL = 原本颜色
-            ud.draw(ud.nr, ud.ng, ud.nb);
-            ud.tex.needsUpdate = true;
+    _refreshPanel() {
+        this._panelButtons().forEach((btn) => {
+            this._setButtonVisual(btn, 'normal');
+        });
+
+        this.ctrlState?.forEach((state) => {
+            state.pressedBtn = null;
         });
     }
 
@@ -1526,22 +1612,26 @@ class App {
 
         // ----------------------------------------------------
         // 两只手都检查完以后统一更新按钮颜色
+        //
+        // 优先级：
+        //
+        // pressed  >  hover  >  normal
         // ----------------------------------------------------
 
         const hoveredButtons = new Set(hits.filter(Boolean).map((hit) => hit.object));
 
+        const pressedButtons = new Set(
+            this.ctrlState.map((state) => state.pressedBtn).filter(Boolean),
+        );
+
         buttons.forEach((btn) => {
-            const ud = btn.userData;
-
-            if (hoveredButtons.has(btn)) {
-                // hover = 亮
-                ud.draw(ud.hr, ud.hg, ud.hb);
+            if (pressedButtons.has(btn)) {
+                this._setButtonVisual(btn, 'pressed');
+            } else if (hoveredButtons.has(btn)) {
+                this._setButtonVisual(btn, 'hover');
             } else {
-                // normal
-                ud.draw(ud.nr, ud.ng, ud.nb);
+                this._setButtonVisual(btn, 'normal');
             }
-
-            ud.tex.needsUpdate = true;
         });
     }
 
@@ -1694,7 +1784,18 @@ class App {
                     return;
                 }
 
-                const clickedAction = hit.object.userData.action;
+                // ------------------------------------------------
+                // 按下去的瞬间先变最暗。
+                //
+                // 先画，再执行动作。
+                // ------------------------------------------------
+
+                const clickedBtn = hit.object;
+
+                this.ctrlState[i].pressedBtn = clickedBtn;
+                this._setButtonVisual(clickedBtn, 'pressed');
+
+                const clickedAction = clickedBtn.userData.action;
 
                 console.log(`[UI CLICK ${i}] → ${clickedAction}`);
 
@@ -1711,6 +1812,13 @@ class App {
 
             ctrl.addEventListener('selectend', () => {
                 this.ctrlState[i].selectPressed = false;
+
+                // 松开扬机 = 不再是 pressed。
+                //
+                // 下一帧 _processControllers 会自动
+                // 把它恢复成 hover 或 normal。
+
+                this.ctrlState[i].pressedBtn = null;
             });
 
             // ----------------------------------------------------
