@@ -243,88 +243,84 @@ function makeButtonMesh(label, r, g, b, w = 0.3, h = 0.1) {
 
     const ctx = canvas.getContext('2d');
 
-    function draw(lr, lg, lb) {
-        ctx.clearRect(0, 0, CW, CH);
-        ctx.fillStyle = `rgb(${lr},${lg},${lb})`;
+    // ------------------------------------------------------------
+    // 只画一次按钮的 NORMAL / 最亮状态
+    // hover 和 pressed 不再重新画 canvas
+    // ------------------------------------------------------------
 
-        const R = 28;
-        ctx.beginPath();
-        ctx.moveTo(R, 0);
-        ctx.lineTo(CW - R, 0);
-        ctx.quadraticCurveTo(CW, 0, CW, R);
-        ctx.lineTo(CW, CH - R);
-        ctx.quadraticCurveTo(CW, CH, CW - R, CH);
-        ctx.lineTo(R, CH);
-        ctx.quadraticCurveTo(0, CH, 0, CH - R);
-        ctx.lineTo(0, R);
-        ctx.quadraticCurveTo(0, 0, R, 0);
-        ctx.closePath();
-        ctx.fill();
+    ctx.clearRect(0, 0, CW, CH);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
 
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-        ctx.lineWidth = 5;
-        ctx.stroke();
+    const R = 28;
 
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 68px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(label, CW / 2, CH / 2);
-    }
+    ctx.beginPath();
+    ctx.moveTo(R, 0);
+    ctx.lineTo(CW - R, 0);
+    ctx.quadraticCurveTo(CW, 0, CW, R);
+    ctx.lineTo(CW, CH - R);
+    ctx.quadraticCurveTo(CW, CH, CW - R, CH);
+    ctx.lineTo(R, CH);
+    ctx.quadraticCurveTo(0, CH, 0, CH - R);
+    ctx.lineTo(0, R);
+    ctx.quadraticCurveTo(0, 0, R, 0);
+    ctx.closePath();
+    ctx.fill();
 
-    draw(r, g, b);
+    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+    ctx.lineWidth = 5;
+    ctx.stroke();
+
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 68px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, CW / 2, CH / 2);
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
 
+    const material = new THREE.MeshBasicMaterial({
+        map: tex,
+
+        // NORMAL 状态保持 texture 原本的亮度
+        color: 0xffffff,
+
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+
+        // UI 不受 tone mapping 影响
+        toneMapped: false,
+    });
+
     const mesh = new THREE.Mesh(
         new THREE.PlaneGeometry(w, h),
-        new THREE.MeshBasicMaterial({
-            map: tex,
-            transparent: true,
-            depthTest: false,
-            side: THREE.DoubleSide,
-        }),
+        material,
     );
 
-    // ------------------------------------------------------------
-    // 三种状态的颜色
-    //
-    // normal  = 最亮   （手没指过来）
-    // hover   = 变暗   （射线指到了）
-    // pressed = 最暗   （扳机按下去）
-    //
-    // 注意方向：
-    // 以前是 hover 更亮，所以 normal 看起来永远是暗的。
-    // 现在反过来。
-    // ------------------------------------------------------------
-
-    const dim = (v, k) => Math.max(Math.round(v * k), 0);
+    // Panel background = 100
+    // Button = 101
+    // 保证按钮永远画在 panel 背景上面
+    mesh.renderOrder = 101;
 
     mesh.userData = {
-        draw,
-        tex,
         isBtn: true,
 
-        // 当前正在显示哪个状态。
-        // 用来避免每一帧都重画 canvas。
+        // 当前视觉状态
+        visualState: 'normal',
 
-        visualState: null,
+        // --------------------------------------------------------
+        // 三个按钮亮度
+        //
+        // normal  = 常亮
+        // hover   = 变暗
+        // pressed = 最暗
+        // --------------------------------------------------------
 
-        // NORMAL
-        nr: r,
-        ng: g,
-        nb: b,
-
-        // HOVER
-        hr: dim(r, 0.62),
-        hg: dim(g, 0.62),
-        hb: dim(b, 0.62),
-
-        // PRESSED
-        dr: dim(r, 0.38),
-        dg: dim(g, 0.38),
-        db: dim(b, 0.38),
+        brightnessNormal: 1.0,
+        brightnessHover: 0.58,
+        brightnessPressed: 0.28,
     };
 
     return mesh;
@@ -366,7 +362,7 @@ class App {
         // 如果以后发现还是偏高 / 偏低，
         // 只改这一个数字就够了。
 
-        const FLOOR_OFFSET = 0;
+        const FLOOR_OFFSET = 1.30;
 
         // 桌面端（非 VR）的相机高度。
         // 进入 VR 后这个值会被 WebXR 覆盖。
@@ -1275,14 +1271,19 @@ class App {
         ptex.colorSpace = THREE.SRGBColorSpace;
 
         const bg = new THREE.Mesh(
-            new THREE.PlaneGeometry(1.05, 0.38),
-            new THREE.MeshBasicMaterial({
-                map: ptex,
-                transparent: true,
-                depthTest: false,
-                side: THREE.DoubleSide,
-            }),
-        );
+    new THREE.PlaneGeometry(1.05, 0.38),
+    new THREE.MeshBasicMaterial({
+        map: ptex,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+    }),
+);
+
+// 背景先画
+bg.renderOrder = 100;
 
         // 基础色 = NORMAL 状态（最亮）。
         // hover / pressed 会自动在这个基础上变暗。
@@ -1324,12 +1325,12 @@ class App {
         this.vrBtnExit.visible = true;
 
         if (initial) {
-            this.vrBtnStart.position.set(-0.17, -0.07, 0.002);
-            this.vrBtnExit.position.set(0.17, -0.07, 0.002);
+            this.vrBtnStart.position.set(-0.17, -0.07, 0.01);
+            this.vrBtnExit.position.set(0.17, -0.07, 0.01);
         } else {
-            this.vrBtnResume.position.set(-0.32, -0.07, 0.002);
-            this.vrBtnRestart.position.set(0, -0.07, 0.002);
-            this.vrBtnExit.position.set(0.32, -0.07, 0.002);
+            this.vrBtnResume.position.set(-0.32, -0.07, 0.01);
+this.vrBtnRestart.position.set(0, -0.07, 0.01);
+this.vrBtnExit.position.set(0.32, -0.07, 0.01);
         }
 
         this._refreshPanel();
@@ -1441,27 +1442,42 @@ class App {
     // ------------------------------------------------------------
 
     _setButtonVisual(btn, mode) {
-        if (!btn) {
-            return;
-        }
-
-        const ud = btn.userData;
-
-        if (ud.visualState === mode) {
-            return;
-        }
-
-        if (mode === 'pressed') {
-            ud.draw(ud.dr, ud.dg, ud.db);
-        } else if (mode === 'hover') {
-            ud.draw(ud.hr, ud.hg, ud.hb);
-        } else {
-            ud.draw(ud.nr, ud.ng, ud.nb);
-        }
-
-        ud.tex.needsUpdate = true;
-        ud.visualState = mode;
+    if (!btn) {
+        return;
     }
+
+    const ud = btn.userData;
+
+    if (ud.visualState === mode) {
+        return;
+    }
+
+    let brightness = ud.brightnessNormal;
+
+    if (mode === 'pressed') {
+        brightness = ud.brightnessPressed;
+    } else if (mode === 'hover') {
+        brightness = ud.brightnessHover;
+    }
+
+    // ------------------------------------------------------------
+    // 不重新画 Canvas。
+    //
+    // 直接改变 material 的亮度：
+    //
+    // normal  = 1.00
+    // hover   = 0.58
+    // pressed = 0.28
+    // ------------------------------------------------------------
+
+    btn.material.color.setRGB(
+        brightness,
+        brightness,
+        brightness,
+    );
+
+    ud.visualState = mode;
+}
 
     _panelButtons() {
         return [
@@ -1766,50 +1782,137 @@ class App {
             // ----------------------------------------------------
 
             ctrl.addEventListener('selectstart', async () => {
-                this.ctrlState[i].selectPressed = true;
-                this.ctrlState[i].justFired = true;
+    const state = this.ctrlState[i];
 
-                // 面板没显示的时候，扳机 = 暂停并呼出菜单
+    state.selectPressed = true;
+    state.justFired = true;
 
-                if (!this.vrPanel.visible) {
-                    this.ctrlState[i].justFired = false;
-                    await this.pauseAndShowMenu();
-                    return;
-                }
+    // ========================================================
+    // CASE 1:
+    // Panel 没有显示
+    //
+    // Trigger = Pause + 呼出 menu
+    // ========================================================
 
-                const hit = this._castController(ctrl);
+    if (!this.vrPanel.visible) {
+        state.justFired = false;
+        state.pressedBtn = null;
 
-                if (!hit) {
-                    console.log(`[UI CLICK ${i}] NO BUTTON`);
-                    return;
-                }
+        await this.pauseAndShowMenu();
+        return;
+    }
 
-                // ------------------------------------------------
-                // 按下去的瞬间先变最暗。
-                //
-                // 先画，再执行动作。
-                // ------------------------------------------------
+    // ========================================================
+    // CASE 2:
+    // Panel 正在显示
+    //
+    // Trigger DOWN：
+    //
+    // 只让按钮进入 PRESSED 状态。
+    // 此时绝对不执行 Start / Resume / Restart / Exit。
+    //
+    // 所以用户按住 trigger 的时候，
+    // 可以清楚看到按钮保持“最暗”。
+    // ========================================================
 
-                const clickedBtn = hit.object;
+    const hit = this._castController(ctrl);
 
-                this.ctrlState[i].pressedBtn = clickedBtn;
-                this._setButtonVisual(clickedBtn, 'pressed');
+    if (!hit) {
+        state.pressedBtn = null;
 
-                const clickedAction = clickedBtn.userData.action;
+        console.log(`[UI PRESS ${i}] NO BUTTON`);
 
-                console.log(`[UI CLICK ${i}] → ${clickedAction}`);
+        return;
+    }
 
-                if (clickedAction === 'start') {
-                    await this.startAudio();
-                } else if (clickedAction === 'resume') {
-                    await this.startAudio();
-                } else if (clickedAction === 'restart') {
-                    await this.restartAudio();
-                } else if (clickedAction === 'exit') {
-                    await this.exitVR();
-                }
-            });
+    const pressedBtn = hit.object;
 
+    state.pressedBtn = pressedBtn;
+
+    this._setButtonVisual(
+        pressedBtn,
+        'pressed',
+    );
+
+    console.log(
+        `[UI PRESS ${i}] → ${pressedBtn.userData.action}`,
+    );
+});
+
+
+ctrl.addEventListener('selectend', async () => {
+    const state = this.ctrlState[i];
+
+    state.selectPressed = false;
+
+    // 保存 trigger DOWN 时按到的按钮
+    const pressedBtn = state.pressedBtn;
+
+    // pressed 状态结束
+    state.pressedBtn = null;
+
+    if (!pressedBtn) {
+        return;
+    }
+
+    // --------------------------------------------------------
+    // 检查 trigger 松开的时候，
+    // 射线是不是仍然停留在同一个按钮。
+    //
+    // 避免：
+    //
+    // 按 Start
+    // ↓
+    // 手移走
+    // ↓
+    // 松 trigger
+    // ↓
+    // Start 仍然误触
+    // --------------------------------------------------------
+
+    const releaseHit = this._castController(ctrl);
+
+    if (
+        !releaseHit ||
+        releaseHit.object !== pressedBtn
+    ) {
+        console.log(
+            `[UI CANCEL ${i}]`,
+            pressedBtn.userData.action,
+        );
+
+        return;
+    }
+
+    const clickedAction =
+        pressedBtn.userData.action;
+
+    console.log(
+        `[UI CLICK ${i}] → ${clickedAction}`,
+    );
+
+    // ========================================================
+    // Trigger RELEASE 才执行真正 action
+    // ========================================================
+
+    if (clickedAction === 'start') {
+
+        await this.startAudio();
+
+    } else if (clickedAction === 'resume') {
+
+        await this.startAudio();
+
+    } else if (clickedAction === 'restart') {
+
+        await this.restartAudio();
+
+    } else if (clickedAction === 'exit') {
+
+        await this.exitVR();
+
+    }
+});
             ctrl.addEventListener('selectend', () => {
                 this.ctrlState[i].selectPressed = false;
 
