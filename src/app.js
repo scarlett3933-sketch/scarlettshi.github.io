@@ -51,6 +51,52 @@ const MASTER_GAIN = 1.0;
 // 一次并行处理 6 个。
 
 const AUDIO_LOAD_CONCURRENCY = 6;
+// ============================================================================
+// FIXED DRONE SOURCES
+// ============================================================================
+//
+// Drone = 固定在世界空间中的声音。
+// 它们不会跟 Clock 一起移动。
+//
+// position = Three.js 世界坐标
+// gain = 每个 Drone 自己的音量
+// loop = 是否循环
+// ============================================================================
+
+const DRONE_CONFIG = [
+    {
+        name: 'Drone_1',
+        file: 'Drone_1.mp3',
+
+        // 左前方
+        position: new THREE.Vector3(0, 2.5, -6),
+
+        gain: 0.35,
+        loop: true,
+    },
+
+    {
+        name: 'Drone_2',
+        file: 'Drone_2.mp3',
+
+        // 右后方
+        position: new THREE.Vector3(7, 4, 5),
+
+        gain: 0.35,
+        loop: true,
+    },
+
+    {
+        name: 'Drone_3',
+        file: 'Drone_3.mp3',
+
+        // 前方高处
+        position: new THREE.Vector3(0, 8, -10),
+
+        gain: 0.30,
+        loop: true,
+    },
+];
 
 // ============================================================================
 // MOVEMENT TIMELINE
@@ -206,7 +252,48 @@ function createClockSpatialChain(outputNode, initialPosition) {
         source: null,
     };
 }
+// ============================================================================
+// FIXED DRONE SPATIAL CHAIN
+// ============================================================================
+//
+// Audio File
+// ↓
+// Gain
+// ↓
+// Panner
+// ↓
+// Master Gain
+// ↓
+// Headphones
+//
+// 和 Clock 一样使用 HRTF。
+// 不同之处：Drone 的位置之后不会每帧更新。
+// ============================================================================
 
+function createDroneSpatialChain(
+    outputNode,
+    initialPosition,
+    gainValue,
+) {
+    const gain = audioCtx.createGain();
+    const panner = createSpatialPanner();
+
+    gain.gain.value = gainValue;
+
+    gain.connect(panner);
+    panner.connect(outputNode);
+
+    setImmediatePannerPos(
+        panner,
+        initialPosition,
+    );
+
+    return {
+        gain,
+        panner,
+        source: null,
+    };
+}
 // 加载并 decode 一个真正的音频文件。
 
 async function loadAudioBuffer(url) {
@@ -425,6 +512,10 @@ class App {
         this.audioLoading = false;
         this.audioLoadErrors = [];
 
+        this.droneRegistry = [];
+        this.droneReady = false;
+        this.droneLoadErrors = [];
+
         // ------------------------------------------------------------
         // CAMERA
         // ------------------------------------------------------------
@@ -509,8 +600,14 @@ class App {
         // 然后才能给 Clock 创建 panner chain。
 
         this.setupAudio();
+
+        // Fixed spatial drones
+        this.setupDrones();
+
+        // Moving clock objects
         this.loadClockModel();
-        this.setupVR();
+
+this.setupVR();
 
         window.addEventListener('resize', this.resize.bind(this));
         this.renderer.setAnimationLoop(this.render.bind(this));
@@ -1050,7 +1147,103 @@ trajectory: (originalPos, tt) => {
         this.masterGain.gain.value = MASTER_GAIN;
         this.masterGain.connect(audioCtx.destination);
     }
+// ========================================================================
+// SETUP FIXED DRONES
+// ========================================================================
 
+setupDrones() {
+    this.droneRegistry = DRONE_CONFIG.map((config) => {
+
+        const audioUrl =
+            `${import.meta.env.BASE_URL}` +
+            `${CLOCK_AUDIO_FOLDER}/` +
+            `${config.file}`;
+
+        const audioNode =
+            createDroneSpatialChain(
+                this.masterGain,
+                config.position,
+                config.gain,
+            );
+
+        return {
+            name: config.name,
+
+            position: config.position.clone(),
+
+            audioUrl,
+            audioBuffer: null,
+            audioNode,
+
+            loop: config.loop,
+        };
+    });
+
+    this.loadDroneAudioFiles();
+}
+
+
+// ========================================================================
+// LOAD FIXED DRONE AUDIO FILES
+// ========================================================================
+
+async loadDroneAudioFiles() {
+    this.droneReady = false;
+    this.droneLoadErrors = [];
+    console.log('[Drone] loadDroneAudioFiles START',this.droneRegistry,);
+
+    for (const droneData of this.droneRegistry) {
+        console.log('[Drone] trying to load:',droneData.audioUrl,);
+
+        try {
+            droneData.audioBuffer =
+                await loadAudioBuffer(
+                    droneData.audioUrl,
+                );
+
+            console.log(
+                `[Drone] loaded: ${droneData.name}`,
+            );
+
+        } catch (error) {
+
+            this.droneLoadErrors.push({
+                name: droneData.name,
+                url: droneData.audioUrl,
+                error,
+            });
+
+            console.error(
+                `[Drone] Failed to load ${droneData.name}:`,
+                droneData.audioUrl,
+                error,
+            );
+        }
+    }
+
+    this.droneReady =
+        this.droneLoadErrors.length === 0 &&
+        this.droneRegistry.every(
+            (droneData) => droneData.audioBuffer,
+        );
+
+    if (this.droneReady) {
+
+        console.log(
+            `%c[Drone] READY — ` +
+            `${this.droneRegistry.length} fixed drones decoded.`,
+            'color:#cc99ff;font-weight:bold',
+        );
+
+    } else {
+
+        console.error(
+            `[Drone] NOT READY — ` +
+            `${this.droneLoadErrors.length} file(s) failed.`,
+            this.droneLoadErrors,
+        );
+    }
+}
     // ========================================================================
     // LOAD ALL CLOCK AUDIO FILES
     // ========================================================================
@@ -1183,7 +1376,38 @@ trajectory: (originalPos, tt) => {
             clockData.audioNode.source = source;
         });
     }
+// ========================================================================
+// CREATE & SCHEDULE FIXED DRONE SOURCES
+// ========================================================================
 
+_createAndScheduleDroneSources(startAt) {
+
+    this.droneRegistry.forEach((droneData) => {
+
+        const source =
+            audioCtx.createBufferSource();
+
+        source.buffer =
+            droneData.audioBuffer;
+
+        // 短 drone 可以一直 loop
+        source.loop =
+            droneData.loop;
+
+        source.connect(
+            droneData.audioNode.gain,
+        );
+
+        // 和所有 Clock 完全相同的 AudioContext timestamp
+        source.start(
+            startAt,
+            0,
+        );
+
+        droneData.audioNode.source =
+            source;
+    });
+}
     // ========================================================================
     // MASTER TIMELINE TIME
     // ========================================================================
@@ -1212,14 +1436,24 @@ trajectory: (originalPos, tt) => {
         // DON'T START UNTIL EVERY STEM IS READY
         // ------------------------------------------------------------
 
-        if (!this.audioReady) {
-            console.warn(
-                '[Audio] Audio is not ready yet. ' +
-                    'Wait for all Clock_N files to finish loading.',
-            );
-            console.log(this.audioLoadErrors);
-            return;
-        }
+        if (!this.audioReady || !this.droneReady) {
+
+    console.warn(
+        '[Audio] Clock stems or Drone sources are not ready yet.',
+    );
+
+    console.log(
+        'Clock errors:',
+        this.audioLoadErrors,
+    );
+
+    console.log(
+        'Drone errors:',
+        this.droneLoadErrors,
+    );
+
+    return;
+}
 
         // ------------------------------------------------------------
         // RESUME AUDIO CONTEXT
@@ -1240,8 +1474,27 @@ trajectory: (originalPos, tt) => {
             const startAt = audioCtx.currentTime + 0.12;
 
             this.timelineStartAt = startAt;
-            this._createAndScheduleClockSources(startAt);
-            this.timelineStarted = true;
+
+// ------------------------------------------------------------
+// MOVING CLOCK SOURCES
+// ------------------------------------------------------------
+
+this._createAndScheduleClockSources(
+    startAt,
+);
+
+// ------------------------------------------------------------
+// FIXED DRONE SOURCES
+//
+// 使用完全相同的 startAt。
+// 所以 Clock 和 Drone 共用同一个 master timeline。
+// ------------------------------------------------------------
+
+this._createAndScheduleDroneSources(
+    startAt,
+);
+
+this.timelineStarted = true;
 
             console.log(
                 `%c[Timeline] START scheduled at ${startAt.toFixed(3)}`,
@@ -1546,7 +1799,37 @@ this.vrBtnExit.position.set(0.32, -0.07, 0.01);
                 setImmediatePannerPos(clockData.audioNode.panner, clockData.originalPosition);
             });
         }
+// ------------------------------------------------------------
+// STOP / RESET FIXED DRONES
+// ------------------------------------------------------------
 
+if (this.droneRegistry) {
+
+    this.droneRegistry.forEach((droneData) => {
+
+        const source =
+            droneData.audioNode.source;
+
+        if (source) {
+
+            try {
+                source.stop();
+            } catch (_) {}
+
+            try {
+                source.disconnect();
+            } catch (_) {}
+
+            droneData.audioNode.source = null;
+        }
+
+        // Drone 永远回到自己的固定世界坐标
+        setImmediatePannerPos(
+            droneData.audioNode.panner,
+            droneData.position,
+        );
+    });
+}
         this.running = false;
         this.timelineStarted = false;
         this.timelineStartAt = null;
