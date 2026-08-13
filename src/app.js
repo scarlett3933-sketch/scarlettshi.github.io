@@ -135,9 +135,13 @@ function getMovementConfig(clockName, index) {
     // ------------------------------------------------------------
 
     return {
-        start: 5 + index * 0.3,
-        duration: 6,
-    };
+    // Demo:
+    // 所有 Clock 在作品第 5 秒同时开始展开
+    start: 5,
+
+    // 5–15 秒完成 spatial expansion
+    duration: 10,
+};
 }
 
 // ============================================================================
@@ -767,18 +771,154 @@ class App {
                         duration: movement.duration,
 
                         // ------------------------------------------------
-                        // TEST TRAJECTORY
-                        //
-                        // 先继续用上一版的测试轨迹。
-                        //
-                        // 后面我们会正式设计每个钟的运动。
-                        // ------------------------------------------------
+// DEMO TRAJECTORY
+//
+// 18 个 Clock 分成三层空间：
+//
+// Clock 1–6    = near  = 5m
+// Clock 7–12   = mid   = 10m
+// Clock 13–18  = far   = 18m
+//
+// tt:
+// 0 → movement start
+// 1 → expansion finished
+// >1 → continue orbiting
+// ------------------------------------------------
 
-                        trajectory: (originalPos, tt) => ({
-                            x: originalPos.x + tt * 3 * Math.sin(index),
-                            y: originalPos.y - tt * 2,
-                            z: originalPos.z + tt * 5 * Math.cos(index),
-                        }),
+trajectory: (originalPos, tt) => {
+
+    // ========================================================
+    // WHICH SPATIAL LAYER?
+    // ========================================================
+
+    // index 0–5   → group 0
+    // index 6–11  → group 1
+    // index 12–17 → group 2
+
+    const group = Math.floor(index / 6);
+
+    const radii = [
+        5,      // near
+        10,     // mid
+        18,     // far
+    ];
+
+    const heights = [
+        2.5,    // near
+        5.0,    // mid
+        8.0,    // far
+    ];
+
+    const radius = radii[group];
+    const baseHeight = heights[group];
+
+
+    // ========================================================
+    // DISTRIBUTE CLOCKS AROUND THE LISTENER / WORLD CENTER
+    // ========================================================
+
+    // 每组六个钟平均分布在 360°
+    const angleOffset =
+        ((index % 6) / 6) * Math.PI * 2
+
+        // 三层稍微错开角度，
+        // 避免三个 ring 完全重叠
+        + group * 0.35;
+
+
+    // ========================================================
+    // EXPANSION
+    // ========================================================
+
+    // tt:
+    //
+    // 0 → 第 5 秒
+    // 1 → 第 15 秒
+    //
+    // smoothstep 让 movement
+    // 不会突然启动 / 突然停止。
+
+    const expandProgress =
+        THREE.MathUtils.smoothstep(
+            Math.min(tt, 1),
+            0,
+            1,
+        );
+
+
+    // ========================================================
+    // ORBIT
+    // ========================================================
+
+    // expansion 完成以前 orbitTime = 0。
+    //
+    // 15 秒以后开始增加。
+
+    const orbitTime =
+        Math.max(0, tt - 1);
+
+
+    // 0.8 是 rotation speed。
+    //
+    // 因为 tt 的 1 大约对应 10 秒，
+    // 所以实际 rotation 很慢。
+
+    const angle =
+        angleOffset
+        + orbitTime * 0.8;
+
+
+    // ========================================================
+    // TARGET POSITION
+    // ========================================================
+
+    const targetX =
+        Math.cos(angle) * radius;
+
+    const targetZ =
+        Math.sin(angle) * radius;
+
+
+    // 轻微上下漂浮。
+    //
+    // 每个 Clock phase 不一样，
+    // 所以不会一起上下动。
+
+    const floatingY =
+        Math.sin(
+            orbitTime * 2.5
+            + index * 0.7
+        ) * 0.8;
+
+    const targetY =
+        baseHeight + floatingY;
+
+
+    // ========================================================
+    // ORIGINAL POSITION → SPATIAL FIELD
+    // ========================================================
+
+    return {
+
+        x: THREE.MathUtils.lerp(
+            originalPos.x,
+            targetX,
+            expandProgress,
+        ),
+
+        y: THREE.MathUtils.lerp(
+            originalPos.y,
+            targetY,
+            expandProgress,
+        ),
+
+        z: THREE.MathUtils.lerp(
+            originalPos.z,
+            targetZ,
+            expandProgress,
+        ),
+    };
+},
                     });
                 });
 
@@ -1201,7 +1341,7 @@ class App {
             // tt = 1 → movement complete
             // --------------------------------------------------------
 
-            const tt = Math.min((t - clockData.movementStart) / clockData.duration, 1);
+            const tt = (t - clockData.movementStart)/ clockData.duration;
 
             // --------------------------------------------------------
             // GET POSITION ON TRAJECTORY
