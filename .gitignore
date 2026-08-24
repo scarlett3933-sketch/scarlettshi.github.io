@@ -3,3 +3,4 @@ dist
 .DS_Storepublic/audio/*.wav
 public/audio/
 .DS_Store
+*.bak
