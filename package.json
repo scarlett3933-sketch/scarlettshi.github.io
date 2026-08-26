@@ -4,11 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "deploy": "gh-pages -d dist"
-  },
+  "dev": "npm run dev:standalone",
+  "dev:standalone": "VITE_RUNTIME_MODE=standalone vite",
+  "dev:michigan": "VITE_RUNTIME_MODE=michigan vite",
+  "build": "npm run build:standalone",
+  "build:standalone": "VITE_RUNTIME_MODE=standalone vite build",
+  "build:michigan": "VITE_RUNTIME_MODE=michigan vite build",
+  "preview": "vite preview",
+  "deploy": "npm run build:standalone && gh-pages -d dist"
+},
+
   "devDependencies": {
     "gh-pages": "^6.3.0",
     "vite": "^8.0.4"
