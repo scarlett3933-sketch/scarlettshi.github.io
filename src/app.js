@@ -1,10 +1,13 @@
 import * as THREE from 'three';
+
+import { InvisoClient } from './inviso/InvisoClient.js';
+import { IS_MICHIGAN } from './runtime/mode.js';
+
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import Stats from 'three/addons/libs/stats.module.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-
 document.addEventListener('DOMContentLoaded', function () {
     const app = new App();
     window.app = app;
@@ -431,6 +434,9 @@ class App {
         document.body.appendChild(container);
 
         this.teleportDebugFrame = 0;
+this.inviso = IS_MICHIGAN
+    ? new InvisoClient()
+    : null;
 
         // ------------------------------------------------------------
         // FLOOR / EYE HEIGHT
@@ -605,9 +611,16 @@ class App {
         this.setupDrones();
 
         // Moving clock objects
-        this.loadClockModel();
+        // Moving clock objects
+
+this.loadClockModel();
+
+if (this.inviso) {
+    this.inviso.connect();
+}
 
 this.setupVR();
+
 
         window.addEventListener('resize', this.resize.bind(this));
         this.renderer.setAnimationLoop(this.render.bind(this));
@@ -2300,7 +2313,9 @@ if (this.droneRegistry) {
         this.scene.add(this.dolly);
 
         this.renderer.xr.addEventListener('sessionstart', () => {
-            this.controls.enabled = false;
+        if (this.inviso) {
+    this.inviso.resetCalibration();}
+    this.controls.enabled = false;
             this.dolly.position.y = this.floorWorldY;
 
             this.setPanelMode('initial');
@@ -2612,6 +2627,14 @@ ctrl.addEventListener('selectend', async () => {
         // ------------------------------------------------------------
 
         this.updateAudioListener();
+if (this.inviso) {
+    this.inviso.updateListener({
+        renderer: this.renderer,
+        camera: this.camera,
+        timeMs: performance.now(),
+    });
+}
+
 
         // ------------------------------------------------------------
         // RENDER
