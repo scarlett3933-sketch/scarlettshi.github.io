@@ -1440,89 +1440,101 @@ _createAndScheduleDroneSources(startAt) {
     // START / RESUME
     // ========================================================================
 
-    async startAudio() {
-        if (this.running) {
-            return;
-        }
+   async startAudio() {
+    if (this.running) {
+        return;
+    }
 
-        // ------------------------------------------------------------
-        // DON'T START UNTIL EVERY STEM IS READY
-        // ------------------------------------------------------------
+    // ------------------------------------------------------------
+    // STANDALONE:
+    // Quest local audio must be fully loaded before playback.
+    //
+    // MICHIGAN:
+    // Quest is not the audio renderer.
+    // Do not block the artwork timeline on local MP3 readiness.
+    // ------------------------------------------------------------
 
-        if (!this.audioReady || !this.droneReady) {
+    if (
+        !IS_MICHIGAN &&
+        (!this.audioReady || !this.droneReady)
+    ) {
+        console.warn(
+            '[Audio] Clock stems or Drone sources are not ready yet.',
+        );
 
-    console.warn(
-        '[Audio] Clock stems or Drone sources are not ready yet.',
-    );
+        console.log(
+            'Clock errors:',
+            this.audioLoadErrors,
+        );
 
-    console.log(
-        'Clock errors:',
-        this.audioLoadErrors,
-    );
+        console.log(
+            'Drone errors:',
+            this.droneLoadErrors,
+        );
 
-    console.log(
-        'Drone errors:',
-        this.droneLoadErrors,
-    );
+        return;
+    }
 
-    return;
-}
+    // ------------------------------------------------------------
+    // MASTER TIMELINE CLOCK
+    //
+    // We still resume AudioContext in both modes because
+    // AudioContext.currentTime is currently our master clock.
+    // ------------------------------------------------------------
 
-        // ------------------------------------------------------------
-        // RESUME AUDIO CONTEXT
-        // ------------------------------------------------------------
+    await audioCtx.resume();
 
-        await audioCtx.resume();
+    // ------------------------------------------------------------
+    // FIRST START ONLY
+    // ------------------------------------------------------------
 
-        // ------------------------------------------------------------
-        // FIRST START ONLY
-        // ------------------------------------------------------------
+    if (!this.timelineStarted) {
+        const startAt =
+            audioCtx.currentTime + 0.12;
 
-        if (!this.timelineStarted) {
-            // 安排到未来 120ms。
-            //
-            // 所有 source 可以提前收到完全相同的
-            // AudioContext timestamp。
+        this.timelineStartAt = startAt;
 
-            const startAt = audioCtx.currentTime + 0.12;
+        // --------------------------------------------------------
+        // STANDALONE AUDIO
+        // --------------------------------------------------------
 
-            this.timelineStartAt = startAt;
+        if (!IS_MICHIGAN) {
+            this._createAndScheduleClockSources(
+                startAt,
+            );
 
-// ------------------------------------------------------------
-// MOVING CLOCK SOURCES
-// ------------------------------------------------------------
-
-this._createAndScheduleClockSources(
-    startAt,
-);
-
-// ------------------------------------------------------------
-// FIXED DRONE SOURCES
-//
-// 使用完全相同的 startAt。
-// 所以 Clock 和 Drone 共用同一个 master timeline。
-// ------------------------------------------------------------
-
-this._createAndScheduleDroneSources(
-    startAt,
-);
-
-this.timelineStarted = true;
-
-            console.log(
-                `%c[Timeline] START scheduled at ${startAt.toFixed(3)}`,
-                'color:#66ccff;font-weight:bold',
+            this._createAndScheduleDroneSources(
+                startAt,
             );
         }
 
-        // 如果不是第一次，
-        // 就是 Stop/Pause 之后继续。
+        // --------------------------------------------------------
+        // MICHIGAN
+        //
+        // No Quest-local audio playback.
+        // The shared artwork timeline still begins normally.
+        // Inviso playback control will be connected via OSC.
+        // --------------------------------------------------------
 
-        this.running = true;
-        this._refreshPanel();
-        this.hideVRPanel();
+        else {
+            console.log(
+                '[Michigan] Master timeline started. Quest local audio bypassed.',
+            );
+        }
+
+        this.timelineStarted = true;
+
+        console.log(
+            `%c[Timeline] START scheduled at ${startAt.toFixed(3)}`,
+            'color:#66ccff;font-weight:bold',
+        );
     }
 
+    this.running = true;
+
+    this._refreshPanel();
+    this.hideVRPanel();
+}
     // ========================================================================
     // PAUSE
     // ========================================================================
@@ -2342,7 +2354,48 @@ if (this.droneRegistry) {
 
         this.controllers.forEach((ctrl, i) => {
             // ----------------------------------------------------
-            // TRIGGER
+            // TRIGGER -> INVISO OSC TEST
+            //
+            // This runs in parallel with the existing trigger logic.
+            // It does NOT replace UI / grab behavior.
+            // ----------------------------------------------------
+
+            ctrl.addEventListener('selectstart', () => {
+                const hand =
+                    ctrl.userData.handedness ||
+                    `controller${i}`;
+
+                const sent = this.inviso?.send({
+                    type: 'controller',
+                    hand,
+                    control: 'trigger',
+                    value: 1,
+                }) ?? false;
+
+                console.log(
+                    `[Controller OSC] ${hand} trigger=1 sent=${sent}`,
+                );
+            });
+
+            ctrl.addEventListener('selectend', () => {
+                const hand =
+                    ctrl.userData.handedness ||
+                    `controller${i}`;
+
+                const sent = this.inviso?.send({
+                    type: 'controller',
+                    hand,
+                    control: 'trigger',
+                    value: 0,
+                }) ?? false;
+
+                console.log(
+                    `[Controller OSC] ${hand} trigger=0 sent=${sent}`,
+                );
+            });
+
+            // ----------------------------------------------------
+            // EXISTING TRIGGER LOGIC
             // ----------------------------------------------------
 
             ctrl.addEventListener('selectstart', async () => {
@@ -2542,7 +2595,17 @@ ctrl.addEventListener('selectend', async () => {
             // CONTROLLER MODEL
             // ----------------------------------------------------
 
-            ctrl.addEventListener('connected', () => {
+            ctrl.addEventListener('connected', (event) => {
+                const handedness =
+                    event.data?.handedness ||
+                    `controller${i}`;
+
+                ctrl.userData.handedness = handedness;
+
+                console.log(
+                    `[XR Controller ${i}] connected as ${handedness}`,
+                );
+
                 const grip = this.renderer.xr.getControllerGrip(i);
                 const factory = new XRControllerModelFactory();
 
