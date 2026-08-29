@@ -13,7 +13,8 @@ export class InvisoClient {
         // --------------------------------------------------------
 
         this.socket = null;
-        this.connected = false;
+this.connected = false;
+this.bridgeReady = false;
 
         const wsProtocol =
             window.location.protocol === 'https:'
@@ -66,6 +67,7 @@ export class InvisoClient {
             '[Inviso] Connecting:',
             this.url,
         );
+        this.bridgeReady = false;
 
         try {
             this.socket = new WebSocket(this.url);
@@ -86,7 +88,8 @@ export class InvisoClient {
         });
 
         this.socket.addEventListener('close', (event) => {
-            this.connected = false;
+    this.connected = false;
+    this.bridgeReady = false;
 
             this.logger.warn(
                 '[Inviso] WebSocket disconnected',
@@ -103,20 +106,82 @@ export class InvisoClient {
         });
 
         this.socket.addEventListener('message', (event) => {
-            try {
-                const message =
-                    JSON.parse(event.data);
+    try {
+        const message = JSON.parse(event.data);
 
-                this.logger.log(
-                    '[Inviso bridge]',
-                    message,
-                );
-            } catch (_) {
-                this.logger.log(
-                    '[Inviso bridge raw]',
-                    event.data,
-                );
-            }
+        this.logger.log(
+            '[Inviso bridge]',
+            message,
+        );
+
+        if (
+            message?.type === 'bridgeStatus' &&
+            message?.connected === true
+        ) {
+            this.bridgeReady = true;
+
+            this.logger.log(
+                '[Inviso] Bridge READY'
+            );
+        }
+
+    } catch (_) {
+        this.logger.log(
+            '[Inviso bridge raw]',
+            event.data,
+        );
+    }
+});
+    }
+        // ============================================================
+    // WAIT FOR REAL BRIDGE READY
+    //
+    // WebSocket open != bridge ready.
+    //
+    // We only continue once quest_bridge.js has sent:
+    //
+    // { type: 'bridgeStatus', connected: true }
+    //
+    // This prevents Michigan mode from reporting READY when the
+    // WebSocket was merely created but the bridge is not usable.
+    // ============================================================
+
+    waitForBridgeReady(timeoutMs = 8000) {
+        // bridgeStatus may already have arrived before this method
+        // gets called, so always check current state first.
+        if (this.connected && this.bridgeReady) {
+            return Promise.resolve(true);
+        }
+
+        return new Promise((resolve, reject) => {
+            const startedAt = performance.now();
+
+            const timer = setInterval(() => {
+                // REAL READY
+                if (this.connected && this.bridgeReady) {
+                    clearInterval(timer);
+
+                    this.logger.log(
+                        '[Inviso] Bridge readiness confirmed',
+                    );
+
+                    resolve(true);
+                    return;
+                }
+
+                // TIMEOUT
+                if (
+                    performance.now() - startedAt >= timeoutMs
+                ) {
+                    clearInterval(timer);
+
+                    reject(
+                        new Error(
+                            `Inviso bridge did not become ready within ${timeoutMs} ms`,
+                        ),
+                    );
+                }
+            }, 50);
         });
     }
 
