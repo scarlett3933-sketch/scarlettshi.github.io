@@ -22,7 +22,7 @@ export default defineConfig(() => {
 
         base: isMichigan
             ? '/'
-            : '/scarlettshi.github.io/',
+            : '/A-Thousand-Clocks-WebXR/',
 
         // ------------------------------------------------------------
         // DEV SERVER
