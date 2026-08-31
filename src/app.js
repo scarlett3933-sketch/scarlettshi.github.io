@@ -442,7 +442,75 @@ const TOWER_MONOLITH_THRESHOLD = 4;
 const TOWER_MAX_FADE_MESHES = 1200;
 
 // ============================================================================
-// CLOCK AUDIO ORBIT
+// CLOCK MOVEMENT PHASES
+//
+// Demo 期间钟的运动由**按钮**驱动，分两段：
+//
+//   IDLE      钟停在 GLB 里的原始位置
+//   IN_TOWER  按 MOVE 之后，每个钟绕**自己的原位**画小圈 + 上下浮动。
+//             绕自己而不是绕塔心 —— 绕塔心会直接穿墙。
+//   OUTSIDE   按 EXPAND 之后，从当时的位置缓慢飞出去，
+//             到塔外的三层轨道上继续绕塔心转。
+//
+// 两段都用 master timeline 的时间，所以暂停时跟着停，Restart 时归零。
+// 正式作品把 movement cue 写进 CLOCK_MOVEMENT 之后，
+// 只要在 cue 上调 startClockMovement() / startClockExpansion() 就行，
+// 运动逻辑本身不用动。
+// ============================================================================
+
+const CLOCK_PHASE = Object.freeze({
+    IDLE: 'idle',
+    IN_TOWER: 'in_tower',
+    OUTSIDE: 'outside',
+});
+
+// ---- IN_TOWER ----
+//
+// 上一版是"绕自己原位画整圆"，那个思路本身就是错的：
+// 不管半径调多小，一个整圆总有半圈是**朝墙外**走的，钟贴着墙排，
+// 所以必然穿墙。缩小半径只能让穿帮变浅，不能消除。
+//
+// 现在换成沿墙面的**切向摆动 + 只朝塔心的内移**，
+// 位移在"向外"这个方向上恒等于零，几何上不可能穿墙：
+//
+//     位移 = 切向 × sin(a) × R  +  内向 × (1 − cos(a))/2 × R
+//
+// a = 0 时两项都是 0，所以起点严格等于原位；
+// 内向那一项永远 ≥ 0，也就是永远只往里、不往外。
+
+// 切向摆幅（米）。这是钟在墙面上左右挪动的最大距离。
+const CLOCK_INSIDE_RADIUS = 0.22;
+const CLOCK_INSIDE_RADIUS_VARIANCE = 0.40;   // 每个钟 ±40%，不然十八个钟同步摆很假
+
+// rad/s。0.06 ≈ 105 秒一个来回，切向最大速度约 1.3 厘米/秒 ——
+// 盯着看才勉强看得出在动，扫一眼是察觉不到的。
+const CLOCK_INSIDE_SPEED = 0.06;
+
+const CLOCK_INSIDE_BOB = 0.06;               // 上下浮动幅度（米）
+const CLOCK_INSIDE_BOB_SPEED = 0.09;         // rad/s，约 70 秒一个来回
+const CLOCK_INSIDE_EASE = 8.0;               // 起步缓入时间（秒），从静止到满幅
+
+// ---- OUTSIDE ----
+
+// 飞出去要多久。"缓慢飞出"就是这个数，14 秒是刻意慢的。
+const CLOCK_EXPAND_DURATION = 14.0;
+
+// 塔外三层轨道的半径和高度。
+//
+// 实测这个 GLB 的塔是又高又窄的：删掉 HLOD / 天空球之后
+// bbox 是 2.67 × 4.83 × 2.67，最大边是**高度**，
+// 所以 scale = 14/4.83 ≈ 2.9，缩放后底面只有 7.7 × 7.7 米、高 14 米。
+// 半宽是 3.87 米，不是我一开始按最大边猜的 7 米。
+//
+// 7/11/16 保证三层都在塔外，同时不会远到看起来像三个小点。
+const CLOCK_OUTSIDE_RADII = [7, 11, 16];
+const CLOCK_OUTSIDE_HEIGHTS = [3.5, 6.0, 9.0];
+const CLOCK_OUTSIDE_BOB = 0.8;
+
+// 钟飞出塔外时，外面的天空从 Tower 底色换成星云。
+// 这是 EXPAND 时长的比例 —— 0.9 表示星空比钟稍早一点到位，
+// 钟飞到轨道上的时候外面已经是星空了，而不是同时才刚好换完。
+const CLOCK_EXPAND_SKY_F = 0.9;
 //
 // Collapse 之后 18 个 Clock 的声音继续存在，但视觉已经消失。
 // 轨道中心 = 参与者**当前位置**（平移），不跟随头部旋转 ——
@@ -456,7 +524,68 @@ const TOWER_MAX_FADE_MESHES = 1200;
 
 const CLOCK_ORBIT_RADII = [5, 10, 18];
 const CLOCK_ORBIT_HEIGHTS = [-0.3, 2.0, 5.0];
-const CLOCK_ORBIT_SPEED = 0.8;
+
+// rad/s。塔外的视觉轨道和 Collapse 之后的音频轨道**共用**这一个速度，
+// 所以 Collapse 那一刻声音不会突然变快或变慢。约 78 秒一圈。
+const CLOCK_ORBIT_SPEED = 0.08;
+
+// ============================================================================
+// RETURN — 从 Timeless Field 回到最后的 Clock Tower
+//
+// 这不是把 Collapse 倒放。倒放会有两个问题：构件"吸"回去很假，
+// 而且钟会重新长回原位、抹掉「时间停在崩塌那一刻」这件事。
+//
+// 现在的做法：
+//
+//   1. 塔整体平移到**参与者当前站的地方**。
+//      和 Collapse 的原则一致 —— 移动世界，不移动人。
+//      参与者可能已经在 donut 上走出去几十米，塔必须去找他，
+//      而不是把他拽回世界原点。
+//
+//   2. 构件从飞散的位置飘回原位并显形，慢进慢出，最后落定。
+//
+//   3. 钟和构件一起飞回**墙上的原位**（GLB 里的位置），然后冻住不再运动。
+//      音频跟着回到同一批坐标 —— 最后听到的声音就来自看得见的那些钟。
+//
+//   4. 星空淡出、雾散掉、灯光回到塔内的白光。
+//
+//   5. 音频从「以人为中心的轨道」插值回冻住的钟的位置 ——
+//      于是最后你听到的声音就来自你看得见的那些钟。
+// ============================================================================
+
+// 18 秒。所有分段（构件显形 60%、钟显形 30%、星空淡出 55%、音频插值）
+// 都是比例，所以改这一个数会整体等比放慢，段与段的关系不变。
+const RETURN_DURATION = 18.0;
+
+const RETURN_PIECE_FADE_END_F = 0.60;      // 构件在前 60% 里显形
+const RETURN_CLOCK_FADE_START_F = 0.30;    // 钟晚一点才开始显形
+const RETURN_AUDIO_BLEND_START_F = 0.10;
+const RETURN_AUDIO_BLEND_END_F = 0.75;
+const RETURN_SKY_FADE_F = 0.55;            // 星空在前 55% 里淡掉
+const RETURN_FIELD_HIDE_F = 0.55;          // 地形在这个进度点收掉（此时塔已经不透明）
+
+// 塔落在参与者脚下时抬起这么多（米）。
+//
+// 不抬的话塔的 Floor 和 donut 表面完全共面，会 z-fighting ——
+// 两个面在同一个深度上闪烁，头显里非常难受。3 厘米人感觉不到，
+// 但足够让 Floor 稳稳压在地形上面。
+const RETURN_FLOOR_CLEARANCE = 0.03;
+
+// ============================================================================
+// RETURN BUTTON
+//
+// 和塔里那三个按钮不一样：这个**不贴脸**，它固定在 donut 上的一个位置，
+// 参与者得自己走过去找到它。
+//
+// 位置写成相对出生点的水平偏移，落地高度由射线打地形算出来 ——
+// donut 是 37° 斜面，写死一个 y 一定会埋进土里或者飘在空中。
+//
+// 11 米刚好在一次 teleport（上限 12 米）之内，找得到也走得到。
+// ============================================================================
+
+const RETURN_BUTTON_OFFSET = { x: 8, z: -8 };
+const RETURN_BUTTON_HEIGHT = 1.5;          // 离地多高（米）
+const RETURN_BUTTON_SIZE = { w: 0.80, h: 0.27 };
 
 // ============================================================================
 // LIGHTING ENDPOINTS
@@ -478,14 +607,16 @@ const FIELD_HEMI_GROUND = new THREE.Color(0x0a1410);
 const FIELD_DIR_COLOR = new THREE.Color(0x8fa4d0);
 
 // ============================================================================
-// WORLD-SPACE COLLAPSE BUTTON
+// WORLD-SPACE BUTTONS
 //
-// 不放在 pause menu 里 —— demo 时需要一个"看得见、走过去点"的实体按钮。
+// 不放在 pause menu 里 —— demo 时需要"看得见、指过去点"的实体按钮。
+// 三个竖排在出生点正前方：MOVE / EXPAND / COLLAPSE。
 // 位置相对 Tower 出生点（世界原点）。
 // ============================================================================
 
-const COLLAPSE_BUTTON_DISTANCE = 1.7;    // 出生点正前方多少米
-const COLLAPSE_BUTTON_EYE_OFFSET = -0.25; // 相对眼高的垂直偏移，略低于视线
+const WORLD_BUTTON_DISTANCE = 1.7;      // 出生点正前方多少米
+const WORLD_BUTTON_TOP_OFFSET = -0.02;  // 最上面那个相对眼高的垂直偏移
+const WORLD_BUTTON_SPACING = 0.24;      // 竖排间距
 
 // ============================================================================
 // LOADING UI
@@ -1325,8 +1456,11 @@ class App {
         this.collapseProgress = 0;
         this.collapsePrepared = false;
 
-        // 星空 / 身边那盏灯的渐入量。0 = 还是 Tower，1 = 完全是 Timeless Field。
+        // 身边那盏灯的渐入量。0 = 还是 Tower，1 = 完全是 Timeless Field。
         this.sceneReveal = 1;
+
+        // 星空的可见程度，由 _updateSkyBlend() 每帧算出来。
+        this.skyBlend = 0;
 
         this.towerCollapsePieces = [];
         this.towerCollapseMode = 'pieces';   // 'pieces' | 'monolith'
@@ -1336,7 +1470,35 @@ class App {
 
         // 世界空间里可以被控制器射线点到的东西（不是 panel UI）。
         this.worldInteractables = [];
+        this.moveButton = null;
+        this.expandButton = null;
         this.collapseButton = null;
+        this.returnButton = null;
+
+        // ------------------------------------------------------------
+        // RETURN STATE
+        //
+        // towerReturnOffset = 塔为了回到参与者脚下所做的整体平移。
+        // Restart 时必须原样减掉，否则第二条 take 的塔会留在上一次的位置。
+        // ------------------------------------------------------------
+
+        this.returnActive = false;
+        this.returnCompleted = false;
+        this.returnStartTime = null;
+        this.returnProgress = 0;
+
+        this.towerReturnOffset = new THREE.Vector3();
+
+        // ------------------------------------------------------------
+        // CLOCK MOVEMENT PHASE
+        //
+        // Demo 期间由 MOVE / EXPAND 两个世界按钮驱动。
+        // 时间取自 master timeline，所以暂停时冻结、Restart 时归零。
+        // ------------------------------------------------------------
+
+        this.clockPhase = CLOCK_PHASE.IDLE;
+        this.clockMoveStartTime = null;
+        this.clockExpandStartTime = null;
 
         // 灯光 / 雾在 Tower（0）和 Timeless Field（1）之间的插值量。
         this.lightingBlend = 0;
@@ -2127,6 +2289,17 @@ class App {
 
                     const fadeEntries = prepareFadeMaterials(clockObj);
 
+                    // 塔心 → 钟 的水平方向。钟正好在中轴上时给一个固定方向，
+                    // 不用随机 —— 撒点必须每次 reload 都一样。
+                    const insideOutward = new THREE.Vector3(originalPosition.x, 0, originalPosition.z);
+
+                    if (insideOutward.lengthSq() < 1e-6) insideOutward.set(1, 0, 0);
+
+                    insideOutward.normalize();
+
+                    // 水平面内右转 90°。
+                    const insideTangent = new THREE.Vector3(-insideOutward.z, 0, insideOutward.x);
+
                     this.clockRegistry.push({
                         name: clockObj.name,
                         index,
@@ -2160,60 +2333,40 @@ class App {
                         audioBuffer: null,      // 由 _bindAudioBuffers() 填入
                         audioNode,
 
+                        // 正式作品的 movement cue。Demo 期间**不使用** ——
+                        // 运动由 MOVE / EXPAND 两个世界按钮驱动。
+                        // 保留这两个字段是为了以后把 CLOCK_MOVEMENT 填上之后，
+                        // 在 cue 时刻直接调 startClockMovement() / startClockExpansion()。
                         movementStart: movement.start,
                         duration: movement.duration,
+
+                        // 塔内摆动的幅度，每个钟略有不同。
+                        // 用 index 做确定性偏移而不是 Math.random()：
+                        // 每次 reload 必须一模一样，否则调试时对不上现象。
+                        insideRadius: CLOCK_INSIDE_RADIUS *
+                            (1 + Math.sin(index * 2.399) * CLOCK_INSIDE_RADIUS_VARIANCE),
+
+                        insideBob: CLOCK_INSIDE_BOB *
+                            (1 + Math.sin(index * 1.117) * 0.4),
+
+                        // 塔内运动的局部坐标系。
+                        //
+                        // outward = 从塔心指向这个钟的水平方向（也就是"朝墙"的方向），
+                        // tangent = 与之垂直的水平方向（也就是"沿着墙"的方向）。
+                        //
+                        // 模型在 loadClockModel() 里已经把 x/z 居中到世界原点，
+                        // 所以塔心就是 (0, y, 0)，直接用钟自己的 x/z 就能算。
+                        insideOutward,
+                        insideTangent,
+
+                        // 按下 EXPAND 那一刻的位置快照，飞出去的起点。
+                        expandBase: originalPosition.clone(),
 
                         // 以人为中心的轨道参数（见 _clockOrbitPosition）
                         orbitGroup: Math.floor(index / 6),
                         orbitAngleOffset: ((index % 6) / 6) * Math.PI * 2 + Math.floor(index / 6) * 0.35,
-
-                        // ------------------------------------------------
-                        // DEMO TRAJECTORY（塔内）
-                        //
-                        // 18 个 Clock 分成三层空间：Clock 1–6 = near = 5m, 7–12 = mid = 10m, 13–18 = far = 18m
-                        // tt: 0 → movement start, 1 → expansion finished, >1 → continue orbiting
-                        //
-                        // 注意这条轨迹**绕世界原点**。Collapse 之后音频不再用它，
-                        // 而是切换到以参与者为中心的轨道（_clockOrbitPosition）。
-                        // ------------------------------------------------
-
-                        trajectory: (originalPos, tt) => {
-                            // WHICH SPATIAL LAYER? index 0–5 → group 0, 6–11 → group 1, 12–17 → group 2
-                            const group = Math.floor(index / 6);
-
-                            const radii = CLOCK_ORBIT_RADII;   // near / mid / far
-                            const heights = [2.5, 5.0, 8.0];   // near / mid / far
-
-                            const radius = radii[group];
-                            const baseHeight = heights[group];
-
-                            // 每组六个钟平均分布在 360°，三层稍微错开角度避免三个 ring 完全重叠
-                            const angleOffset = ((index % 6) / 6) * Math.PI * 2 + group * 0.35;
-
-                            // tt: 0 → 第 5 秒, 1 → 第 15 秒。smoothstep 让 movement 不会突然启动 / 突然停止。
-                            const expandProgress = THREE.MathUtils.smoothstep(Math.min(tt, 1), 0, 1);
-
-                            // expansion 完成以前 orbitTime = 0，15 秒以后开始增加。
-                            const orbitTime = Math.max(0, tt - 1);
-
-                            // 0.8 是 rotation speed，因为 tt 的 1 大约对应 10 秒，所以实际 rotation 很慢。
-                            const angle = angleOffset + orbitTime * CLOCK_ORBIT_SPEED;
-
-                            const targetX = Math.cos(angle) * radius;
-                            const targetZ = Math.sin(angle) * radius;
-
-                            // 轻微上下漂浮，每个 Clock phase 不一样所以不会一起上下动。
-                            const floatingY = Math.sin(orbitTime * 2.5 + index * 0.7) * 0.8;
-                            const targetY = baseHeight + floatingY;
-
-                            // ORIGINAL POSITION → SPATIAL FIELD
-                            return {
-                                x: THREE.MathUtils.lerp(originalPos.x, targetX, expandProgress),
-                                y: THREE.MathUtils.lerp(originalPos.y, targetY, expandProgress),
-                                z: THREE.MathUtils.lerp(originalPos.z, targetZ, expandProgress),
-                            };
-                        },
                     });
+
                 });
 
                 // ------------------------------------------------------------
@@ -2659,6 +2812,9 @@ class App {
 
             this._alignTimelessFieldToTowerSpawn();
 
+            // RETURN 按钮要用地形做射线找落地高度，所以必须在对齐之后建。
+            this._createReturnButton();
+
             this.applyExperienceState();
             this._checkPhase1Done();
 
@@ -2995,6 +3151,7 @@ class App {
             EXPERIENCE_STATE.READ_NOTES,
             EXPERIENCE_STATE.SPECIAL_CLOCK,
             EXPERIENCE_STATE.COLLAPSE,
+            EXPERIENCE_STATE.RETURN,
             EXPERIENCE_STATE.FINAL_TOWER,
             EXPERIENCE_STATE.END,
         ].includes(state);
@@ -3033,7 +3190,9 @@ class App {
         // "塔散开露出草地"就变成"塔散开露出灰色平面"。
         // ------------------------------------------------------------
 
-        const debugVisible = !timelessVisible;
+        // Collapse 发生过之后就永远不再显示：塔可能已经被平移到 donut 上，
+        // 那块 y = 0 的调试地板会变成一片浮在半空的灰色平面。
+        const debugVisible = !timelessVisible && !this.collapseCompleted;
 
         if (this.debugHelpers) {
             this.debugHelpers.forEach((object) => { object.visible = debugVisible; });
@@ -3046,11 +3205,9 @@ class App {
         // loadSky() 完成时会再调一次 applyExperienceState() 补上。
         // ------------------------------------------------------------
 
-        if (timelessVisible && this.skyTexture) {
-            this.scene.background = this.skyTexture;
-        } else {
-            this.scene.background = this.towerBackground;
-        }
+        // 背景由 _updateSkyBlend() 统一决定 —— 它同时要考虑三件事：
+        // 当前 state、EXPAND 之后的星空渐入、Collapse 的场景渐入。
+        this._updateSkyBlend();
 
         // ------------------------------------------------------------
         // LIGHTING
@@ -3071,7 +3228,7 @@ class App {
             state === EXPERIENCE_STATE.COLLAPSE ? (this.sceneReveal ?? 0) : 1,
         );
 
-        this._updateCollapseButtonVisibility();
+        this._updateWorldButtons();
 
         console.log('[State visuals]', {
             state, towerVisible, timelessVisible, clocks: this.clockRegistry?.length ?? 0,
@@ -3139,9 +3296,84 @@ class App {
 
         this.sceneReveal = t;
 
-        if ('backgroundIntensity' in this.scene) this.scene.backgroundIntensity = t;
-
+        // 背景不在这里写 —— 它归 _updateSkyBlend() 管，
+        // 因为 EXPAND 可能已经把星空拉起来了，Collapse 不能把它按回去。
         if (this.fieldLamp) this.fieldLamp.intensity = FIELD_LAMP_INTENSITY * t;
+    }
+
+    // ========================================================================
+    // SKY BLEND
+    //
+    // 星空的可见程度由三个来源取**最大值**，每帧算一次：
+    //
+    //   1. EXPAND       钟飞出塔外时，外面从 Tower 底色换成星云
+    //   2. Collapse     场景渐入（_applySceneReveal 的那 4 秒）
+    //   3. state        已经在 Timeless Field / Return 里就是 1
+    //
+    // 取最大值而不是按优先级覆盖，是为了防止一个真实的顺序问题：
+    // 先按 EXPAND 把星空拉到 1，再按 COLLAPSE ——
+    // 如果 Collapse 从 0 重新渐入，星空会先"啪"地消失再淡回来。
+    //
+    // 实现上用 scene.backgroundIntensity 而不是加天空球：不多 draw call。
+    // Tower 底色 0x101820 本来就接近纯黑，所以从底色切到"亮度 0 的星空"
+    // 肉眼看不出来。星空还没下载完时整段安全跳过。
+    // ========================================================================
+
+    _updateSkyBlend() {
+        if (!this.scene) return;
+
+        const timelessVisible = [
+            EXPERIENCE_STATE.COLLAPSE,
+            EXPERIENCE_STATE.TIMELESS_FIELD,
+            EXPERIENCE_STATE.RETURN,
+        ].includes(this.experienceState);
+
+        // ---- 1. EXPAND ----
+
+        let expandSky = 0;
+
+        // RETURN 一旦开始，EXPAND 拉起来的那份星空必须让位 ——
+        // 否则 max() 会把它永远钉在 1，天永远暗不下来。
+        if (this.clockPhase === CLOCK_PHASE.OUTSIDE &&
+            this.clockExpandStartTime !== null &&
+            this.timelineStarted &&
+            !this.returnActive &&
+            !this.returnCompleted) {
+
+            expandSky = THREE.MathUtils.smoothstep(
+                this.getTimelineTime() - this.clockExpandStartTime,
+                0,
+                CLOCK_EXPAND_DURATION * CLOCK_EXPAND_SKY_F,
+            );
+        }
+
+        // ---- 2 / 3. Collapse 和 state ----
+
+        let stateSky = 0;
+
+        if (this.returnActive) {
+            stateSky = 1 - THREE.MathUtils.smoothstep(this.returnProgress, 0, RETURN_SKY_FADE_F);
+        } else if (this.returnCompleted) {
+            stateSky = 0;
+        } else if (this.collapseActive) {
+            stateSky = this.sceneReveal ?? 0;
+        } else if (timelessVisible) {
+            stateSky = 1;
+        }
+
+        const sky = Math.max(expandSky, stateSky);
+
+        this.skyBlend = sky;
+
+        if (sky > 0.001 && this.skyTexture) {
+            this.scene.background = this.skyTexture;
+
+            if ('backgroundIntensity' in this.scene) this.scene.backgroundIntensity = sky;
+        } else {
+            this.scene.background = this.towerBackground;
+
+            if ('backgroundIntensity' in this.scene) this.scene.backgroundIntensity = 1;
+        }
     }
 
     // ========================================================================
@@ -3165,7 +3397,8 @@ class App {
     // DEBUG STATE KEYS
     //
     // Desktop: 0 Intro / 1 Tower / 2 Special / 3 Collapse / 4 Field / 5 Return / 6 Final Tower
-    //          C = 触发 Collapse（和世界里那个红按钮走同一个入口）
+    //          M = 钟在塔内开始动 / E = 钟飞出塔外 / C = 触发 Collapse
+    //          （三个都和世界里那三个按钮走同一个入口）
     //          S = Set Spawn（在 Timeless Field 里按，读出归一化锚点）
     // ========================================================================
 
@@ -3179,8 +3412,23 @@ class App {
                 return;
             }
 
+            if (event.key === 'm' || event.key === 'M') {
+                this.startClockMovement('keyboard M');
+                return;
+            }
+
+            if (event.key === 'e' || event.key === 'E') {
+                this.startClockExpansion('keyboard E');
+                return;
+            }
+
             if (event.key === 'c' || event.key === 'C') {
                 this.startCollapse('keyboard C');
+                return;
+            }
+
+            if (event.key === 'r' || event.key === 'R') {
+                this.startReturn('keyboard R');
                 return;
             }
 
@@ -3202,7 +3450,8 @@ class App {
         });
 
         console.log(
-            '[State keys] 0 Intro | 1 Tower | 2 Special | 3 Collapse | 4 Field | 5 Return | 6 Final Tower | C Collapse | S Set Spawn',
+            '[State keys] 0 Intro | 1 Tower | 2 Special | 3 Collapse | 4 Field | 5 Return | 6 Final Tower' +
+            ' || M Clocks move | E Clocks expand | C Collapse | R Return | S Set Spawn',
         );
     }
 
@@ -3292,46 +3541,58 @@ class App {
         this.scene.add(this.teleportMarker);
 
         // WORLD-SPACE COLLAPSE BUTTON
-        this._createCollapseButton();
+        this._createWorldButtons();
     }
 
     // ========================================================================
-    // WORLD-SPACE COLLAPSE BUTTON
+    // WORLD-SPACE BUTTONS
     //
     // 真正的世界空间物体，不在 pause menu 里，也不挂在 dolly 上。
-    // 站在出生点正前方 1.7 米、视线略下方。
+    // 竖排在出生点正前方 1.7 米，从眼高往下依次是 MOVE / EXPAND / COLLAPSE。
     //
     // 复用现有的按钮外观（makeButtonMesh）和现有的控制器射线系统 ——
-    // 没有第二套 interaction。区别只是它进的是 this.worldInteractables，
+    // 没有第二套 interaction。区别只是它们进的是 this.worldInteractables，
     // 而 _castController() 在 panel 没显示时会去打这个列表。
+    //
+    // 三个按钮互相不阻塞：没按过 MOVE 也可以直接按 EXPAND（钟会从原位直接飞出去），
+    // 随时可以按 COLLAPSE。按过的按钮自己消失，避免重复触发。
     // ========================================================================
 
-    _createCollapseButton() {
-        const button = makeButtonMesh('COLLAPSE', 205, 60, 60, 0.52, 0.175);
+    _createWorldButtons() {
+        const eyeY = this.towerSpawnPosition.y + this.floorWorldY + this.eyeHeight;
 
-        button.userData.action = 'collapse';
-        button.userData.isWorldButton = true;
+        const make = (label, r, g, b, action, row) => {
+            const button = makeButtonMesh(label, r, g, b, 0.52, 0.175);
 
-        // depthTest 已经是 false（makeButtonMesh 的 UI 材质），
-        // renderOrder 抬高保证它画在塔和草之前。
-        button.renderOrder = 1500;
+            button.userData.action = action;
+            button.userData.isWorldButton = true;
 
-        button.position.set(
-            this.towerSpawnPosition.x,
-            this.towerSpawnPosition.y + this.floorWorldY + this.eyeHeight + COLLAPSE_BUTTON_EYE_OFFSET,
-            this.towerSpawnPosition.z - COLLAPSE_BUTTON_DISTANCE,
-        );
+            // depthTest 已经是 false（makeButtonMesh 的 UI 材质），
+            // renderOrder 抬高保证它画在塔和草之前。
+            button.renderOrder = 1500;
 
-        button.visible = false;
+            button.position.set(
+                this.towerSpawnPosition.x,
+                eyeY + WORLD_BUTTON_TOP_OFFSET - row * WORLD_BUTTON_SPACING,
+                this.towerSpawnPosition.z - WORLD_BUTTON_DISTANCE,
+            );
 
-        this.scene.add(button);
+            button.visible = false;
 
-        this.collapseButton = button;
-        this.worldInteractables = [button];
+            this.scene.add(button);
+
+            return button;
+        };
+
+        this.moveButton = make('MOVE', 60, 200, 115, 'clockmove', 0);
+        this.expandButton = make('EXPAND', 90, 150, 230, 'clockexpand', 1);
+        this.collapseButton = make('COLLAPSE', 205, 60, 60, 'collapse', 2);
+
+        this.worldInteractables = [this.moveButton, this.expandButton, this.collapseButton];
     }
 
-    _updateCollapseButtonVisibility() {
-        if (!this.collapseButton) return;
+    _updateWorldButtons() {
+        if (!this.worldInteractables?.length) return;
 
         const towerPhase = [
             EXPERIENCE_STATE.INTRO,
@@ -3339,25 +3600,43 @@ class App {
             EXPERIENCE_STATE.SPECIAL_CLOCK,
         ].includes(this.experienceState);
 
-        const visible = Boolean(
+        const usable = Boolean(
             this.timelineStarted &&
             towerPhase &&
             !this.collapseActive &&
             !this.collapseCompleted,
         );
 
-        if (this.collapseButton.visible === visible) return;
+        // RETURN 按钮不受 towerPhase 约束 —— 它只在 Timeless Field 里出现，
+        // 而且固定在 donut 上，不跟着人走。
+        const returnUsable = Boolean(
+            this.experienceState === EXPERIENCE_STATE.TIMELESS_FIELD &&
+            this.collapseCompleted &&
+            !this.returnActive &&
+            !this.returnCompleted,
+        );
 
-        this.collapseButton.visible = visible;
+        const wanted = new Map([
+            [this.moveButton, usable && this.clockPhase === CLOCK_PHASE.IDLE],
+            [this.expandButton, usable && this.clockPhase !== CLOCK_PHASE.OUTSIDE],
+            [this.collapseButton, usable],
+            [this.returnButton, returnUsable],
+        ]);
 
-        if (!visible) {
-            this._setButtonVisual(this.collapseButton, 'normal');
+        wanted.forEach((visible, button) => {
+            if (!button || button.visible === visible) return;
+
+            button.visible = visible;
+
+            if (visible) return;
+
+            this._setButtonVisual(button, 'normal');
 
             this.ctrlState?.forEach((state) => {
-                if (state.pressedBtn === this.collapseButton) state.pressedBtn = null;
-                if (state.hoveredBtn === this.collapseButton) state.hoveredBtn = null;
+                if (state.pressedBtn === button) state.pressedBtn = null;
+                if (state.hoveredBtn === button) state.hoveredBtn = null;
             });
-        }
+        });
     }
 
     // ========================================================================
@@ -3540,7 +3819,7 @@ class App {
 
         this.running = true;
 
-        this._updateCollapseButtonVisibility();
+        this._updateWorldButtons();
         this._refreshPanel();
         this.hideVRPanel();
     }
@@ -3612,15 +3891,13 @@ class App {
     // ------------------------------------------------------------
 
     _prepareCollapse() {
-        // 按钮立刻消失，避免第二次点击。
-        if (this.collapseButton) {
-            this.collapseButton.visible = false;
-            this._setButtonVisual(this.collapseButton, 'normal');
-        }
-
-        this.ctrlState?.forEach((state) => {
-            if (state.pressedBtn === this.collapseButton) state.pressedBtn = null;
+        // 三个世界按钮立刻消失，避免 Collapse 期间再点到任何一个。
+        this.worldInteractables?.forEach((button) => {
+            button.visible = false;
+            this._setButtonVisual(button, 'normal');
         });
+
+        this.ctrlState?.forEach((state) => { state.pressedBtn = null; });
 
         // 融化的起点 = 当前视觉位置（钟这时候可能已经在轨道上飞了）。
         this.clockRegistry?.forEach((clockData) => {
@@ -3853,6 +4130,19 @@ class App {
     // ------------------------------------------------------------
 
     _clockAudioBlend() {
+        // RETURN 期间从「以人为中心的轨道」插值回冻住的钟的位置。
+        if (this.returnActive) {
+            const elapsed = Math.max(0, this.getTimelineTime() - this.returnStartTime);
+
+            return 1 - THREE.MathUtils.smoothstep(
+                elapsed,
+                RETURN_DURATION * RETURN_AUDIO_BLEND_START_F,
+                RETURN_DURATION * RETURN_AUDIO_BLEND_END_F,
+            );
+        }
+
+        if (this.returnCompleted) return 0;
+
         if (this.collapseActive) {
             const elapsed = Math.max(0, this.getTimelineTime() - this.collapseStartTime);
 
@@ -3879,16 +4169,17 @@ class App {
     // 原本在正前方的声源会正确地跑到侧面/背后。绝不是 head-locked。
     // ------------------------------------------------------------
 
-    _clockOrbitPosition(clockData, listener, tt, out) {
+    _clockOrbitPosition(clockData, listener, orbitTime, out) {
         const group = clockData.orbitGroup;
 
         const radius = CLOCK_ORBIT_RADII[group];
         const relativeHeight = CLOCK_ORBIT_HEIGHTS[group];
 
-        const orbitTime = Math.max(0, tt - 1);
+        // orbitTime 是**秒**，和塔外视觉轨道用的是同一个基准和同一个角速度，
+        // 所以 Collapse 那一刻声音的方位和刚才看到的钟是对得上的。
         const angle = clockData.orbitAngleOffset + orbitTime * CLOCK_ORBIT_SPEED;
 
-        const floatingY = Math.sin(orbitTime * 2.5 + clockData.index * 0.7) * 0.8;
+        const floatingY = Math.sin(orbitTime * 0.5 + clockData.index * 0.7) * CLOCK_OUTSIDE_BOB;
 
         return out.set(
             listener.x + Math.cos(angle) * radius,
@@ -3953,22 +4244,29 @@ class App {
         const blend = this._clockAudioBlend();
         const melting = this.collapseActive || this.collapseCompleted;
 
+        // 塔外视觉轨道 / Collapse 之后的音频轨道共用这个时间基准，
+        // 所以两者的角度永远对得上，Collapse 那一刻声音不会跳。
+        const orbitTime = this.clockExpandStartTime !== null
+            ? Math.max(0, t - this.clockExpandStartTime)
+            : 0;
+
         this.clockRegistry.forEach((clockData) => {
-            const tt = (t - clockData.movementStart) / clockData.duration;
-
             // ------------------------------------------------------------
-            // 塔内轨迹坐标。即使视觉已经融化，音频的"旧坐标"仍然继续算，
-            // 这样 Collapse 期间的插值不会在中途出现跳变。
+            // 塔坐标系里的位置（IDLE / IN_TOWER / OUTSIDE 三段）。
+            // 即使视觉已经在融化，这个坐标仍然继续算 ——
+            // 音频要用它作为插值的"旧坐标"，中途断掉会听见跳变。
             // ------------------------------------------------------------
 
-            if (t >= clockData.movementStart) {
-                const pos = clockData.trajectory(clockData.originalPosition, tt);
-
-                clockData.towerPosition.set(pos.x, pos.y, pos.z);
-
-                // 融化期间视觉由 _updateClockMelt() 接管，不要在这里覆写。
-                if (!melting) clockData.visualObject.position.copy(clockData.towerPosition);
+            if (this.returnActive || this.returnCompleted) {
+                // 回到墙上的原位并停住 —— 不再运动，音频也来自那里。
+                clockData.towerPosition.copy(clockData.originalPosition);
+            } else {
+                this._clockTowerFramePosition(clockData, t, clockData.towerPosition);
             }
+
+            // 融化 / 回归期间视觉由 _updateClockMelt() 和 updateReturn() 接管，
+            // 不要在这里覆写。
+            if (!melting) clockData.visualObject.position.copy(clockData.towerPosition);
 
             // ------------------------------------------------------------
             // AUDIO POSITION
@@ -3977,9 +4275,9 @@ class App {
             if (blend <= 0) {
                 clockData.audioPosition.copy(clockData.towerPosition);
             } else if (blend >= 1) {
-                this._clockOrbitPosition(clockData, listener, tt, clockData.audioPosition);
+                this._clockOrbitPosition(clockData, listener, orbitTime, clockData.audioPosition);
             } else {
-                this._clockOrbitPosition(clockData, listener, tt, this._tmpVecB);
+                this._clockOrbitPosition(clockData, listener, orbitTime, this._tmpVecB);
 
                 clockData.audioPosition.copy(clockData.towerPosition).lerp(this._tmpVecB, blend);
             }
@@ -3995,6 +4293,450 @@ class App {
         if (++this._timelineDebugFrame % 180 === 0) {
             console.log(`[Timeline] ${t.toFixed(3)}s`);
         }
+    }
+
+    // ========================================================================
+    // CLOCK POSITION IN THE TOWER FRAME
+    //
+    // 三段：
+    //
+    //   IDLE      停在 GLB 原位
+    //   IN_TOWER  绕**自己的原位**画小圈 + 上下浮动，缓入 4 秒
+    //   OUTSIDE   从按下 EXPAND 那一刻的位置，14 秒缓慢插值到塔外轨道，
+    //             之后一直绕塔心转
+    //
+    // 绕自己而不是绕塔心，是因为钟本来就贴着墙排 ——
+    // 绕塔心画圈会直接穿墙出去。
+    // ========================================================================
+
+    _clockTowerFramePosition(clockData, t, out) {
+        const origin = clockData.originalPosition;
+
+        if (this.clockPhase === CLOCK_PHASE.IDLE || this.clockMoveStartTime === null) {
+            return out.copy(origin);
+        }
+
+        // ---- IN_TOWER ----
+
+        const e = Math.max(0, t - this.clockMoveStartTime);
+
+        // 缓入：e = 0 时幅度为 0，所以起点严格等于原位，不会跳。
+        const ramp = THREE.MathUtils.smoothstep(e, 0, CLOCK_INSIDE_EASE);
+        const angleIn = clockData.orbitAngleOffset + e * CLOCK_INSIDE_SPEED;
+
+        // 沿墙面左右摆（可正可负），以及只朝塔心的内移（永远 ≥ 0）。
+        // 向外的分量恒等于零，所以几何上不可能穿墙。
+        const swing = Math.sin(angleIn) * clockData.insideRadius * ramp;
+        const inward = (1 - Math.cos(angleIn)) * 0.5 * clockData.insideRadius * ramp;
+
+        out.copy(origin)
+            .addScaledVector(clockData.insideTangent, swing)
+            .addScaledVector(clockData.insideOutward, -inward);
+
+        out.y += Math.sin(e * CLOCK_INSIDE_BOB_SPEED + clockData.index * 0.9) *
+            clockData.insideBob * ramp;
+
+        if (this.clockPhase !== CLOCK_PHASE.OUTSIDE || this.clockExpandStartTime === null) {
+            return out;
+        }
+
+        // ---- OUTSIDE ----
+
+        const eo = Math.max(0, t - this.clockExpandStartTime);
+        const p = THREE.MathUtils.smoothstep(eo, 0, CLOCK_EXPAND_DURATION);
+
+        const group = clockData.orbitGroup;
+        const radius = CLOCK_OUTSIDE_RADII[group];
+        const angle = clockData.orbitAngleOffset + eo * CLOCK_ORBIT_SPEED;
+        const bob = Math.sin(eo * 0.5 + clockData.index * 0.7) * CLOCK_OUTSIDE_BOB;
+
+        this._tmpVecA.set(
+            Math.cos(angle) * radius,
+            CLOCK_OUTSIDE_HEIGHTS[group] + bob,
+            Math.sin(angle) * radius,
+        );
+
+        // 起点是按下按钮那一刻的快照，所以 p = 0 时严格连续。
+        return out.copy(clockData.expandBase).lerp(this._tmpVecA, p);
+    }
+
+    // ========================================================================
+    // CLOCK MOVEMENT — 两个入口
+    //
+    // MOVE 按钮 / 键盘 M  → 钟在塔内开始动
+    // EXPAND 按钮 / 键盘 E → 钟缓慢飞出塔外
+    //
+    // 没按过 MOVE 也可以直接按 EXPAND：那种情况下钟从原位直接飞出去。
+    // ========================================================================
+
+    startClockMovement(reason = 'move button') {
+        if (!this.timelineStarted) {
+            console.warn('[Clocks] 时间轴还没开始 — 先按 Start。');
+            return false;
+        }
+
+        if (this.clockPhase !== CLOCK_PHASE.IDLE) {
+            console.log('[Clocks] 已经在动了 — 忽略。');
+            return false;
+        }
+
+        this.clockPhase = CLOCK_PHASE.IN_TOWER;
+        this.clockMoveStartTime = this.getTimelineTime();
+
+        this._updateWorldButtons();
+
+        console.log(
+            `%c[Clocks] IN TOWER — 18 个钟开始在塔内运动，缓入 ${CLOCK_INSIDE_EASE}s。reason=${reason}`,
+            'color:#00ff88;font-weight:bold',
+        );
+
+        return true;
+    }
+
+    startClockExpansion(reason = 'expand button') {
+        if (!this.timelineStarted) {
+            console.warn('[Clocks] 时间轴还没开始 — 先按 Start。');
+            return false;
+        }
+
+        if (this.clockPhase === CLOCK_PHASE.OUTSIDE) {
+            console.log('[Clocks] 已经飞出去了 — 忽略。');
+            return false;
+        }
+
+        const now = this.getTimelineTime();
+
+        // 没按过 MOVE 就直接按 EXPAND：把塔内那一段的起点也定在此刻，
+        // 于是 ramp = 0，钟从原位直接开始往外飞。
+        if (this.clockMoveStartTime === null) this.clockMoveStartTime = now;
+
+        // 飞出去的起点 = 每个钟此刻的位置快照。
+        this.clockRegistry?.forEach((clockData) => {
+            clockData.expandBase.copy(clockData.towerPosition);
+        });
+
+        this.clockPhase = CLOCK_PHASE.OUTSIDE;
+        this.clockExpandStartTime = now;
+
+        this._updateWorldButtons();
+        this._updateSkyBlend();
+
+        console.log(
+            `%c[Clocks] EXPANDING — ${CLOCK_EXPAND_DURATION}s 飞到塔外轨道 ` +
+            `${CLOCK_OUTSIDE_RADII.join(' / ')} 米。reason=${reason}`,
+            'color:#66ccff;font-weight:bold',
+        );
+
+        return true;
+    }
+
+    // ========================================================================
+    // RETURN BUTTON
+    //
+    // 固定在 donut 上的一个位置，不跟着人走。参与者得自己走过去找到它。
+    // 只有在 TIMELESS_FIELD 里才可见。
+    //
+    // 落地高度靠射线打真实地形算 —— donut 是 37° 斜面，
+    // 写死一个 y 一定会埋进土里或者飘在半空。
+    //
+    // 必须在 Timeless Field 加载并对齐之后才能建（要用地形做射线）。
+    // ========================================================================
+
+    _createReturnButton() {
+        if (this.returnButton) return;
+        if (!this.timelessFieldTerrainRoot || !this.timelessFieldOriginPosition) return;
+
+        const spawn = this.timelessFieldOriginPosition;
+
+        const x = spawn.x + RETURN_BUTTON_OFFSET.x;
+        const z = spawn.z + RETURN_BUTTON_OFFSET.z;
+
+        // 从出生点上方 100 米往下打，找这个 x/z 上的地面。
+        this.spawnRaycaster.set(
+            new THREE.Vector3(x, spawn.y + 100, z),
+            new THREE.Vector3(0, -1, 0),
+        );
+
+        this.spawnRaycaster.near = 0;
+        this.spawnRaycaster.far = 400;
+
+        const hits = this.spawnRaycaster.intersectObject(this.timelessFieldTerrainRoot, true);
+
+        // 打不中就退回到出生点的高度。斜面上会有偏差，但至少不会消失。
+        let groundY = spawn.y;
+
+        if (hits.length > 0) {
+            // donut 一条竖线上可能有上下两层，取最接近出生点高度的那一层。
+            let best = hits[0];
+
+            hits.forEach((hit) => {
+                if (Math.abs(hit.point.y - spawn.y) < Math.abs(best.point.y - spawn.y)) best = hit;
+            });
+
+            groundY = best.point.y;
+        } else {
+            console.warn('[Return] 按钮位置下方没有地面，退回到出生点高度。检查 RETURN_BUTTON_OFFSET。');
+        }
+
+        const button = makeButtonMesh(
+            'RETURN', 230, 155, 55,
+            RETURN_BUTTON_SIZE.w, RETURN_BUTTON_SIZE.h,
+        );
+
+        button.userData.action = 'return';
+        button.userData.isWorldButton = true;
+
+        button.renderOrder = 1500;
+
+        button.position.set(x, groundY + RETURN_BUTTON_HEIGHT, z);
+
+        // 面朝出生点，这样人一转身就看到正面。
+        button.lookAt(spawn.x, groundY + RETURN_BUTTON_HEIGHT, spawn.z);
+
+        button.visible = false;
+
+        this.scene.add(button);
+
+        this.returnButton = button;
+        this.worldInteractables.push(button);
+
+        console.log(
+            '%c[Return] 按钮已放置',
+            'color:#ffcc66;font-weight:bold',
+            {
+                world: button.position.toArray().map((v) => Number(v.toFixed(2))),
+                距出生点: Number(
+                    Math.hypot(RETURN_BUTTON_OFFSET.x, RETURN_BUTTON_OFFSET.z).toFixed(1),
+                ),
+                地面高度: Number(groundY.toFixed(2)),
+            },
+        );
+    }
+
+    // ========================================================================
+    // TOWER OFFSET
+    //
+    // 把整座塔（含 18 个已经 detach 到 scene 的钟）平移 delta。
+    //
+    // 传负值就是撤销 —— Restart 走的就是这条路，所以塔一定回得到世界原点。
+    // teleportFloorY 跟着一起动，否则 FINAL_TOWER 里的 teleport 平面
+    // 会留在旧的高度上。
+    // ========================================================================
+
+    _applyTowerOffset(delta) {
+        if (delta.lengthSq() === 0) return;
+
+        if (this.towerRoot) this.towerRoot.position.add(delta);
+
+        this.clockRegistry?.forEach((clockData) => {
+            clockData.visualObject.position.add(delta);
+            clockData.originalPosition.add(delta);
+            clockData.meltBasePosition.add(delta);
+            clockData.towerPosition.add(delta);
+            clockData.audioPosition.add(delta);
+            clockData.expandBase.add(delta);
+        });
+
+        this.towerReturnOffset.add(delta);
+
+        this.teleportFloorY = this.towerSpawnPosition.y + this.towerReturnOffset.y;
+    }
+
+    // ========================================================================
+    // START RETURN
+    // ========================================================================
+
+    startReturn(reason = 'return button') {
+        if (this.returnActive) {
+            console.log('[Return] 已经在进行中 — 忽略。');
+            return false;
+        }
+
+        if (this.returnCompleted) {
+            console.log('[Return] 这一轮已经回来过了 — 需要 Restart。');
+            return false;
+        }
+
+        if (!this.collapseCompleted) {
+            console.warn('[Return] 塔还没塌 — 先按 COLLAPSE。');
+            return false;
+        }
+
+        // ------------------------------------------------------------
+        // 塔搬到参与者脚下，而不是把参与者搬回塔。
+        // ------------------------------------------------------------
+
+        const head = new THREE.Vector3();
+        this.camera.getWorldPosition(head);
+
+        // 脚下的真实地面高度。dolly.y = terrainY + floorWorldY 是 teleport 的
+        // 约定，所以反过来减就得到地面。
+        const groundY = this.dolly ? this.dolly.position.y - this.floorWorldY : 0;
+
+        const target = new THREE.Vector3(head.x, groundY, head.z);
+
+        const delta = target
+            .sub(this.towerSpawnPosition)
+            .sub(this.towerReturnOffset);
+
+        delta.y += RETURN_FLOOR_CLEARANCE;
+
+        this._applyTowerOffset(delta);
+
+        // ------------------------------------------------------------
+        // 草立刻收掉。
+        //
+        // 草是 1.7 米高的，塔的 Floor 落在脚下之后草会直接从地板里长出来 ——
+        // 那个穿帮比"草忽然不见了"难看得多。地形留到 55%，
+        // 那时候 Floor 已经完全不透明，把它盖住了，收掉看不出来。
+        // ------------------------------------------------------------
+
+        if (this.grassField) this.grassField.visible = false;
+
+        // ------------------------------------------------------------
+        // 快照：构件和钟此刻的样子，就是回归动画的起点。
+        // ------------------------------------------------------------
+
+        this.towerCollapsePieces?.forEach((piece) => {
+            piece.returnFromPosition = piece.object.position.clone();
+            piece.returnFromQuaternion = piece.object.quaternion.clone();
+        });
+
+        this.clockRegistry?.forEach((clockData) => {
+            clockData.returnFromPosition = clockData.visualObject.position.clone();
+            clockData.returnFromScale = clockData.visualObject.scale.clone();
+
+            // 融化时被关掉了，回归动画要靠透明度而不是 visible 来控制。
+            clockData.visualObject.visible = true;
+        });
+
+        this.returnActive = true;
+        this.returnStartTime = this.getTimelineTime();
+        this.returnProgress = 0;
+
+        // 按钮收掉，防止连点。
+        this.worldInteractables?.forEach((button) => {
+            button.visible = false;
+            this._setButtonVisual(button, 'normal');
+        });
+
+        this.ctrlState?.forEach((state) => { state.pressedBtn = null; });
+
+        this.setExperienceState(EXPERIENCE_STATE.RETURN, reason);
+
+        console.log(
+            `%c[Return] START — ${RETURN_DURATION}s。塔平移 ` +
+            `${delta.toArray().map((v) => v.toFixed(1)).join(', ')} 到参与者脚下。reason=${reason}`,
+            'color:#ffcc66;font-weight:bold;font-size:13px',
+        );
+
+        return true;
+    }
+
+    // ------------------------------------------------------------
+    // 每帧推进。和 Collapse 一样由 render loop 驱动，时间来自 master timeline。
+    // ------------------------------------------------------------
+
+    updateReturn() {
+        if (!this.returnActive) return;
+        if (!this.running) return;
+
+        const elapsed = Math.min(
+            RETURN_DURATION,
+            Math.max(0, this.getTimelineTime() - this.returnStartTime),
+        );
+
+        const p = elapsed / RETURN_DURATION;
+
+        this.returnProgress = p;
+
+        const ease = THREE.MathUtils.smoothstep(p, 0, 1);
+
+        // ---- 灯光 / 雾：从旷野回到塔内 ----
+
+        this._applyLightingBlend(1 - ease);
+        this._applySceneReveal(1 - ease);
+
+        // ---- 构件飘回原位并显形 ----
+
+        const pieceAlpha = THREE.MathUtils.smoothstep(p, 0, RETURN_PIECE_FADE_END_F);
+
+        this.towerCollapsePieces?.forEach((piece) => {
+            if (!piece.returnFromPosition) return;
+
+            piece.object.position.lerpVectors(
+                piece.returnFromPosition,
+                piece.originalPosition,
+                ease,
+            );
+
+            piece.object.quaternion.slerpQuaternions(
+                piece.returnFromQuaternion,
+                piece.originalQuaternion,
+                ease,
+            );
+
+            if (piece.fadeEntries?.length) setFadeAlpha(piece.fadeEntries, pieceAlpha);
+        });
+
+        // ---- 钟回到「崩塌那一刻」的位置并恢复形状 ----
+
+        const clockAlpha = THREE.MathUtils.smoothstep(p, RETURN_CLOCK_FADE_START_F, 1);
+
+        this.clockRegistry?.forEach((clockData) => {
+            if (!clockData.returnFromPosition) return;
+
+            clockData.visualObject.position.lerpVectors(
+                clockData.returnFromPosition,
+                clockData.originalPosition,
+                ease,
+            );
+
+            clockData.visualObject.scale.lerpVectors(
+                clockData.returnFromScale,
+                clockData.originalScale,
+                ease,
+            );
+
+            if (clockData.fadeEntries) setFadeAlpha(clockData.fadeEntries, clockAlpha);
+        });
+
+        // ---- 地形在塔的地板变实之后收掉 ----
+
+        if (this.timelessFieldTerrainRoot) {
+            this.timelessFieldTerrainRoot.visible = p < RETURN_FIELD_HIDE_F;
+        }
+
+        if (elapsed >= RETURN_DURATION) this._finishReturn();
+    }
+
+    _finishReturn() {
+        this.returnActive = false;
+        this.returnCompleted = true;
+        this.returnProgress = 1;
+
+        // 落定：直接写死终点，避免浮点误差留下一点点偏移。
+        this.towerCollapsePieces?.forEach((piece) => {
+            piece.object.position.copy(piece.originalPosition);
+            piece.object.quaternion.copy(piece.originalQuaternion);
+
+            if (piece.fadeEntries?.length) restoreFadeMaterials(piece.fadeEntries);
+        });
+
+        this.clockRegistry?.forEach((clockData) => {
+            clockData.visualObject.position.copy(clockData.originalPosition);
+            clockData.visualObject.scale.copy(clockData.originalScale);
+            clockData.visualObject.visible = true;
+
+            if (clockData.fadeEntries) restoreFadeMaterials(clockData.fadeEntries);
+        });
+
+        this.setExperienceState(EXPERIENCE_STATE.FINAL_TOWER, 'return complete');
+
+        console.log(
+            '%c[Return] DONE — 塔回来了，18 个钟回到墙上的原位并停住。',
+            'color:#00ff88;font-weight:bold',
+        );
     }
 
     // ========================================================================
@@ -4205,7 +4947,7 @@ class App {
         this.ctrlState.forEach((state) => { state.hoveredBtn = null; });
 
         // panel 打开时世界按钮不参与射线，把它的高亮状态收干净。
-        if (this.collapseButton) this._setButtonVisual(this.collapseButton, 'normal');
+        this.worldInteractables?.forEach((button) => this._setButtonVisual(button, 'normal'));
 
         this._refreshPanel();
         this.vrPanel.visible = true;
@@ -4241,6 +4983,46 @@ class App {
         this.collapseStartTime = null;
         this.collapseProgress = 0;
         this.sceneReveal = 1;
+
+        // ------------------------------------------------------------
+        // RETURN 状态
+        //
+        // 塔在 RETURN 时被平移到了参与者脚下，这里必须原样减回去，
+        // 否则第二条 take 的塔会留在 donut 上一次停的地方。
+        //
+        // 注意这和 Timeless Field 的对齐偏移是两回事：
+        // Field 的那个是**永久**的世界布局，绝对不能撤销。
+        // ------------------------------------------------------------
+
+        if (this.towerReturnOffset.lengthSq() > 0) {
+            this._applyTowerOffset(this.towerReturnOffset.clone().negate());
+        }
+
+        this.towerReturnOffset.set(0, 0, 0);
+        this.teleportFloorY = this.towerSpawnPosition.y;
+
+        this.returnActive = false;
+        this.returnCompleted = false;
+        this.returnStartTime = null;
+        this.returnProgress = 0;
+
+        this.towerCollapsePieces?.forEach((piece) => {
+            piece.returnFromPosition = null;
+            piece.returnFromQuaternion = null;
+        });
+
+        // RETURN 期间被单独关掉的两个子节点。fieldRoot.visible 由 state 控制，
+        // 但它的孩子有自己的 visible，不还原的话第二条 take 的旷野是空的。
+        if (this.grassField) this.grassField.visible = true;
+        if (this.timelessFieldTerrainRoot) this.timelessFieldTerrainRoot.visible = true;
+
+        // ------------------------------------------------------------
+        // CLOCK 运动阶段
+        // ------------------------------------------------------------
+
+        this.clockPhase = CLOCK_PHASE.IDLE;
+        this.clockMoveStartTime = null;
+        this.clockExpandStartTime = null;
 
         // ------------------------------------------------------------
         // TOWER 构件
@@ -4280,6 +5062,10 @@ class App {
                 clockData.towerPosition.copy(clockData.originalPosition);
                 clockData.audioPosition.copy(clockData.originalPosition);
                 clockData.meltBasePosition.copy(clockData.originalPosition);
+                clockData.expandBase.copy(clockData.originalPosition);
+
+                clockData.returnFromPosition = null;
+                clockData.returnFromScale = null;
 
                 setImmediatePannerPos(clockData.audioNode.panner, clockData.originalPosition);
             });
@@ -4334,7 +5120,7 @@ class App {
         this._timelineDebugFrame = 0;
 
         // timelineStarted 清掉之后按钮应该消失，等下一次 Start 再出现。
-        this._updateCollapseButtonVisibility();
+        this._updateWorldButtons();
 
         console.log('[Reset] Experience restored to clean start state (Field alignment preserved).');
     }
@@ -4932,8 +5718,14 @@ class App {
                     await this.startAudio();
                 } else if (clickedAction === 'restart') {
                     await this.restartAudio();
+                } else if (clickedAction === 'clockmove') {
+                    this.startClockMovement(`world button / controller ${i}`);
+                } else if (clickedAction === 'clockexpand') {
+                    this.startClockExpansion(`world button / controller ${i}`);
                 } else if (clickedAction === 'collapse') {
                     this.startCollapse(`world button / controller ${i}`);
+                } else if (clickedAction === 'return') {
+                    this.startReturn(`world button / controller ${i}`);
                 } else if (clickedAction === 'setspawn') {
                     // panel 留在原地，数值直接画上去，人可以立刻抄。
                     this.setSpawnHere();
@@ -5053,12 +5845,16 @@ class App {
             this.updateTeleport();
 
             this.updateCollapse();               // 定时解体动画，时间来自 master timeline。
+            this.updateReturn();                 // 定时回归动画，同一个时间基准。
 
             this.updateClocks();                 // Movement 从 Web Audio master timeline 读取时间。
             this.updateDrones();                 // 相对参与者的固定偏移。
             this.updateDebugStateSequence();      // TEMPORARY NARRATIVE STATE TEST
 
             this.updateAudioListener();
+
+            // 星空渐入（EXPAND / Collapse 两条来源取最大值）。
+            this._updateSkyBlend();
 
             // Michigan 模式才有 inviso 实例，Standalone 下这里是 no-op。
             if (this.inviso) {
